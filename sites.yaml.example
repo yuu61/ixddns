@@ -9,7 +9,7 @@
 defaults:
   # 既存のRoute 53パブリックホストゾーンID（例: Z0123456789EXAMPLE）
   hosted_zone_id: Z0123456789EXAMPLE
-  region: ap-northeast-3
+  region: ap-northeast-1
   aws_profile: ""
   record_ttl: 60
   log_retention_days: 30
@@ -20,24 +20,31 @@ defaults:
   asn_prefixes_file: ""
 
 # 各サイト・レコードの設定一覧
-# キー名（tokyo-v4, osaka など）は任意の識別子です（英数字、ハイフン、アンダースコア）。
+# 拠点ごとに契約回線（ISP/ASN）が異なる場合は、サイトごとに allowed_asns を個別に指定します。
+# allowed_asns はリスト形式 [64496, 64500]、単一値 64496、文字列 "64496,64500" のいずれも指定可能です。
 sites:
-  # 例1: 東京拠点の IPv4（Aレコード）
+  # 例1: 東京拠点（IPv4: Aレコード、プロバイダAのASN 64496に制限）
   tokyo-v4:
     record_name: tokyo.example.com
     record_type: A
     ix_wan_if: GigaEthernet0.1
+    asn_restriction_enabled: true
+    asn_restriction_method: static
+    allowed_asns: [64496]
     # stack_name を省略した場合は ixddns-<キー名>（例: ixddns-tokyo-v4）になります
     # ix_config_output を省略した場合は examples/nec-ix-ddns-<キー名>.cfg になります
 
-  # 例2: 東京拠点の IPv6（AAAAレコード）
+  # 例2: 東京拠点（IPv6: AAAAレコード、同じくプロバイダAのASN 64496に制限）
   tokyo-v6:
     record_name: tokyo.example.com
     record_type: AAAA
     ix_source_if: GigaEthernet0.1
     ix_notify_if: GigaEthernet1.0
+    asn_restriction_enabled: true
+    asn_restriction_method: static
+    allowed_asns: [64496]
 
-  # 例3: 大阪拠点の IPv4（個別設定の上書き例）
+  # 例3: 大阪拠点（IPv4: Aレコード、プロバイダBのASN 64500と予備系64501を指定）
   osaka:
     stack_name: ixddns-osaka
     record_name: osaka.example.com
@@ -46,4 +53,13 @@ sites:
     record_ttl: 120
     asn_restriction_enabled: true
     asn_restriction_method: static
-    allowed_asns: "64496,64500"
+    allowed_asns:
+      - 64500
+      - 64501
+
+  # 例4: 福岡拠点（IPv4: Aレコード、ASN制限を行わない拠点）
+  fukuoka:
+    record_name: fukuoka.example.com
+    record_type: A
+    ix_wan_if: GigaEthernet0.1
+    asn_restriction_enabled: false

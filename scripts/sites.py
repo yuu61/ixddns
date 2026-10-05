@@ -267,6 +267,43 @@ def _validate_interfaces(
     return ix_wan_if, ix_source_if, ix_notify_if
 
 
+def _normalize_allowed_asns(raw: object, site_id: str) -> str:
+    """ASN指定 (文字列・整数・リスト) をカンマ区切りの文字列に正規化する。
+
+    Returns:
+        正規化済みのASN文字列。
+
+    Raises:
+        SitesConfigError: ASNの形式が不正な場合。
+
+    """
+    if not raw:
+        return ""
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return str(raw)
+    if isinstance(raw, list):
+        items: list[str] = []
+        for item in raw:
+            if isinstance(item, int) and not isinstance(item, bool):
+                items.append(str(item))
+            elif isinstance(item, str):
+                items.append(item.strip())
+            else:
+                message = (
+                    f"[{site_id}] allowed_asnsの要素は整数または"
+                    f"文字列で指定してください: {item!r}"
+                )
+                raise SitesConfigError(message)
+        return ",".join(items)
+    if isinstance(raw, str):
+        return raw.strip()
+    message = (
+        f"[{site_id}] allowed_asnsには文字列、整数、または"
+        f"リストを指定してください: {raw!r}"
+    )
+    raise SitesConfigError(message)
+
+
 def _validate_asn(
     site_id: str, merged: dict[str, object]
 ) -> tuple[bool, str, str, str]:
@@ -292,10 +329,12 @@ def _validate_asn(
         )
         raise SitesConfigError(message)
 
-    allowed_asns = str(merged.get("allowed_asns", "")).strip()
+    raw_asns = merged.get("allowed_asns")
+    allowed_asns = _normalize_allowed_asns(raw_asns, site_id)
     if asn_enabled:
         try:
-            check_asn_config("true", allowed_asns, asn_method)
+            validated = check_asn_config("true", allowed_asns, asn_method)
+            allowed_asns = ",".join(str(item) for item in validated)
         except ValueError as error:
             message = f"[{site_id}] ASN制限の設定が不正です: {error}"
             raise SitesConfigError(message) from error
@@ -521,16 +560,18 @@ def cmd_list(sites: dict[str, SiteConfig]) -> int:
         終了コード0。
 
     """
-    col_site = 16
-    col_stack = 20
-    col_record = 28
+    col_site = 12
+    col_stack = 18
+    col_record = 24
     col_type = 6
-    col_ttl = 6
-    col_if = 24
+    col_ttl = 5
+    col_asn = 20
+    col_if = 22
     header = (
         f"{'SITE':<{col_site}} {'STACK_NAME':<{col_stack}} "
         f"{'RECORD_NAME':<{col_record}} {'TYPE':<{col_type}} "
-        f"{'TTL':<{col_ttl}} {'INTERFACE':<{col_if}} {'REGION'}"
+        f"{'TTL':<{col_ttl}} {'ASN_RESTRICTION':<{col_asn}} "
+        f"{'INTERFACE':<{col_if}} {'REGION'}"
     )
     print(header)
     print("-" * len(header))
@@ -538,12 +579,19 @@ def cmd_list(sites: dict[str, SiteConfig]) -> int:
         interface = (
             site.ix_wan_if
             if site.record_type == "A"
-            else f"src:{site.ix_source_if} notify:{site.ix_notify_if}"
+            else f"src:{site.ix_source_if} notif:{site.ix_notify_if}"
         )
+        if not site.asn_restriction_enabled:
+            asn_str = "disabled"
+        else:
+            asn_str = f"{site.asn_restriction_method}:{site.allowed_asns}"
+            if len(asn_str) > col_asn - 1:
+                asn_str = asn_str[: col_asn - 4] + "..."
         print(
             f"{site.site_id:<{col_site}} {site.stack_name:<{col_stack}} "
             f"{site.record_name:<{col_record}} {site.record_type:<{col_type}} "
-            f"{site.record_ttl:<{col_ttl}} {interface:<{col_if}} {site.region}"
+            f"{site.record_ttl:<{col_ttl}} {asn_str:<{col_asn}} "
+            f"{interface:<{col_if}} {site.region}"
         )
     return 0
 
@@ -609,7 +657,10 @@ def cmd_ix_config(
     return 1 if errors else 0
 
 
-def _build_template_for_site(site: SiteConfig) -> Path:
+def _build_template_for_site(
+    site: SiteConfig,
+    snapshot_cache: dict[tuple[int, ...], dict[str, object]] | None = None,
+) -> Path:
     """サイト固有のテンプレートをビルドして保存する。
 
     Returns:
@@ -625,17 +676,30 @@ def _build_template_for_site(site: SiteConfig) -> Path:
         configured_asns = check_asn_config(
             "true", site.allowed_asns, site.asn_restriction_method
         )
-        if site.asn_prefixes_file:
+        asn_key = tuple(configured_asns)
+        if snapshot_cache is not None and asn_key in snapshot_cache:
+            snapshot = snapshot_cache[asn_key]
+        elif site.asn_prefixes_file:
             snapshot = read_snapshot(Path(site.asn_prefixes_file), configured_asns)
         else:
             snapshot = fetch_snapshot(configured_asns)
+
+        if snapshot_cache is not None and asn_key not in snapshot_cache:
+            snapshot_cache[asn_key] = snapshot
+
+        prefixes_path = build_dir / f"asn-prefixes-{site.site_id}.json"
+        write_atomic(prefixes_path, json.dumps(snapshot, indent=2))
 
     template_data = build_template(snapshot)
     write_atomic(template_path, json.dumps(template_data, indent=2))
     return template_path
 
 
-def _deploy_single_site(site: SiteConfig, aws_cmd: str) -> bool:
+def _deploy_single_site(
+    site: SiteConfig,
+    aws_cmd: str,
+    snapshot_cache: dict[tuple[int, ...], dict[str, object]] | None = None,
+) -> bool:
     """単一サイトのデプロイを実行する。
 
     Returns:
@@ -644,7 +708,7 @@ def _deploy_single_site(site: SiteConfig, aws_cmd: str) -> bool:
     """
     print(f"[{site.site_id}] テンプレートをビルド中...")
     try:
-        template_path = _build_template_for_site(site)
+        template_path = _build_template_for_site(site, snapshot_cache=snapshot_cache)
     except (ValueError, OSError) as error:
         print(f"[{site.site_id}] テンプレートビルド失敗: {error}", file=sys.stderr)
         return False
@@ -705,8 +769,9 @@ def cmd_deploy(
     """
     targets = [sites[site_filter]] if site_filter else list(sites.values())
     errors = 0
+    snapshot_cache: dict[tuple[int, ...], dict[str, object]] = {}
     for site in targets:
-        success = _deploy_single_site(site, aws_cmd)
+        success = _deploy_single_site(site, aws_cmd, snapshot_cache=snapshot_cache)
         if not success:
             errors += 1
     return 1 if errors else 0

@@ -105,6 +105,29 @@ sites:
         self.assertEqual(configs["site1"].hosted_zone_id, "Z1111111111")
         self.assertEqual(configs["site1"].stack_name, "ixddns-site1")
 
+    def test_allowed_asns_formats(self) -> None:
+        cases = [
+            ("list_int", "[64496, 64500]", "64496,64500"),
+            ("list_str", "['64500', '64496']", "64496,64500"),
+            ("single_int", "64496", "64496"),
+            ("comma_str", "' 64500, 64496 '", "64496,64500"),
+        ]
+        for name, asns_yaml, expected in cases:
+            with self.subTest(case=name):
+                content = f"""defaults:
+  hosted_zone_id: Z123
+sites:
+  s1:
+    record_name: s.ex.com
+    ix_wan_if: Gi0
+    asn_restriction_enabled: true
+    asn_restriction_method: static
+    allowed_asns: {asns_yaml}
+"""
+                p = self._write_file(f"asns_{name}.yaml", content)
+                configs = sites.load_sites_file(p)
+                self.assertEqual(configs["s1"].allowed_asns, expected)
+
     def test_to_env_and_to_settings(self) -> None:
         path = self._write_file("sites.yaml", self.valid_yaml_content)
         configs = sites.load_sites_file(path)
@@ -307,6 +330,9 @@ sites:
         self.assertIn("tokyo-v4", stdout.getvalue())
         self.assertIn("tokyo-v6", stdout.getvalue())
         self.assertIn("osaka", stdout.getvalue())
+        self.assertIn("ASN_RESTRICTION", stdout.getvalue())
+        self.assertIn("static:64496,64500", stdout.getvalue())
+        self.assertIn("disabled", stdout.getvalue())
 
         stdout = io.StringIO()
         with redirect_stdout(stdout):
@@ -347,6 +373,40 @@ sites:
         self.assertEqual(code, 0)
         self.assertIn("[tokyo-v4] デプロイ成功", stdout.getvalue())
         self.assertEqual(mock_run.call_count, 1)
+
+    @patch("scripts.sites.subprocess.run")
+    @patch("scripts.sites.fetch_snapshot")
+    def test_deploy_caches_snapshot_for_same_asns(
+        self, mock_fetch: MagicMock, mock_run: MagicMock
+    ) -> None:
+        mock_fetch.return_value = {
+            "query_time": "2026-03-01T00:00:00Z",
+            "asns": [64496],
+            "cidrs": ["198.51.100.0/24"],
+        }
+        mock_run.return_value = MagicMock(returncode=0)
+        content = """defaults:
+  hosted_zone_id: Z123
+  asn_restriction_enabled: true
+  asn_restriction_method: static
+  allowed_asns: [64496]
+sites:
+  tokyo:
+    record_name: t.ex.com
+    ix_wan_if: Gi0
+  nagoya:
+    record_name: n.ex.com
+    ix_wan_if: Gi1
+"""
+        p = self._write_file("cache_test.yaml", content)
+        configs = sites.load_sites_file(p)
+        code = sites.cmd_deploy(configs)
+        self.assertEqual(code, 0)
+        self.assertEqual(mock_fetch.call_count, 1)
+        prefixes_tokyo = self.directory.parents[0] / "asn-prefixes-tokyo.json"
+        if not prefixes_tokyo.exists():
+            prefixes_tokyo = sites.PROJECT / ".build" / "asn-prefixes-tokyo.json"
+        self.assertTrue(prefixes_tokyo.exists())
 
     @patch("scripts.sites.aws_json")
     def test_cmd_outputs_and_token(self, mock_aws: MagicMock) -> None:

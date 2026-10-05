@@ -180,6 +180,32 @@ make token-sites SITE=tokyo-v4
 
 設定ファイルを別名で管理する場合は`SITES_FILE`で指定できます（例: `make list-sites SITES_FILE=prod-sites.yaml`）。
 
+### 拠点ごとにプロバイダ（ASN）が異なる場合
+
+複数拠点では、拠点ごとに契約回線（ISP/プロバイダ）が異なり、送信元ASNが変わることが一般的です。
+各サイト定義で `allowed_asns` を個別に指定することで、**「東京スタックへの更新は東京拠点の回線ASNからのみ許可し、大阪スタックへの更新は大阪拠点の回線ASNからのみ許可する」** という厳格な拠点別アクセス制御が可能です。
+
+```yaml
+sites:
+  tokyo:
+    record_name: tokyo.example.com
+    ix_wan_if: GigaEthernet0.1
+    asn_restriction_enabled: true
+    asn_restriction_method: static
+    allowed_asns: [64496] # 東京拠点のISPのASN
+
+  osaka:
+    record_name: osaka.example.com
+    ix_wan_if: GigaEthernet0.1
+    asn_restriction_enabled: true
+    asn_restriction_method: static
+    allowed_asns: [64500, 64501] # 大阪拠点の主回線・予備回線のASN
+```
+
+- `allowed_asns` はリスト形式 `[64496, 64500]`、単一値 `64496`、文字列 `"64496,64500"` のいずれも記述できます。
+- `make list-sites` で各拠点のASN制限状態（`static:64496` や `disabled` など）を一覧で確認できます。
+- `static` 方式での一括デプロイ時（`make deploy-all`）、複数拠点で同一のASNが使われていてもビルドキャッシュによりRIPEstatへの重複アクセスを自動抑止します。
+
 ### スタック分離によるセキュリティ上の利点
 
 手元の設定は1ファイルで管理しつつ、AWS側はサイトごとに独立したスタック（Lambda・IAMロール・Secrets Manager）として展開されます。
