@@ -14,7 +14,7 @@ MAX_AGE = timedelta(hours=48)
 
 def timestamp(value):
     if not isinstance(value, str):
-        raise ValueError("取得日時が不正です。")
+        raise TypeError("取得日時が不正です。")
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     # RIPEstatのquery_timeはUTCのタイムゾーン表記なしです。
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed

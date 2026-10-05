@@ -135,9 +135,8 @@ class AsnConfigTests(unittest.TestCase):
             "64496,64496",
             ",".join(str(value) for value in range(1, 102)),
         ):
-            with self.subTest(allowed=allowed):
-                with self.assertRaises(ValueError):
-                    check_asn_config("true", allowed)
+            with self.subTest(allowed=allowed), self.assertRaises(ValueError):
+                check_asn_config("true", allowed)
         check_asn_config("true", "64496, 64500")
         check_asn_config("true", "4294967295")
 
@@ -145,9 +144,8 @@ class AsnConfigTests(unittest.TestCase):
         check_asn_config("false", "")
         check_asn_config("false", "AS64496")
         for enabled in ("True", "tru", "1", ""):
-            with self.subTest(enabled=enabled):
-                with self.assertRaises(ValueError):
-                    check_asn_config(enabled, "64496")
+            with self.subTest(enabled=enabled), self.assertRaises(ValueError):
+                check_asn_config(enabled, "64496")
 
 
 if __name__ == "__main__":

@@ -44,7 +44,8 @@ def load_handler(route53, secrets, code=None):
         "botocore.exceptions": exceptions,
     }
     with patch.dict(sys.modules, modules):
-        exec(compile(code, "lambda/index.py", "exec"), module.__dict__)
+        # リポジトリ内のLambdaコードを、AWSクライアントをモックした状態で検証します。
+        exec(compile(code, "lambda/index.py", "exec"), module.__dict__)  # noqa: S102
     return module
 
 

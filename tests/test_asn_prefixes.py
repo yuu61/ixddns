@@ -111,9 +111,11 @@ class PrefixTests(unittest.TestCase):
         for change, result in variations:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.fetch(result)
-        with patch.object(asn_prefixes, "urlopen", side_effect=URLError("unavailable")):
-            with self.assertRaises(ValueError):
-                asn_prefixes.fetch_snapshot([3333], self.now)
+        with (
+            patch.object(asn_prefixes, "urlopen", side_effect=URLError("unavailable")),
+            self.assertRaises(ValueError),
+        ):
+            asn_prefixes.fetch_snapshot([3333], self.now)
 
     def test_every_requested_asn_must_succeed(self):
         with patch.object(

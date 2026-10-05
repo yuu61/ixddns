@@ -140,7 +140,7 @@ def main():
                     snapshot_output,
                     json.dumps(snapshot, ensure_ascii=False, indent=2) + "\n",
                 )
-    except (OSError, ValueError) as error:
+    except (OSError, TypeError, ValueError) as error:
         print(f"テンプレート生成失敗: {error}", file=sys.stderr)
         return 1
     print(f"CloudFormationテンプレートを生成しました: {args.output}")
