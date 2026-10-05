@@ -1,0 +1,10 @@
+.build/
+examples/*.cfg
+.ruff_cache/
+.tools/
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
