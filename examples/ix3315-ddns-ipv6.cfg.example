@@ -1,0 +1,38 @@
+! IX3315向けRoute 53 DDNS設定 / IPv6（AAAAレコード）をIPv4のHTTPSで通知
+! RECORD_TYPE=AAAAと別のSTACK_NAMEを指定して、IPv6用スタックを作成してください。
+! 参照資料: IX2000/IX3000マニュアル Ver.10.11-1.1
+! Administrator権限のオペレーションモードから投入してください。
+! IPv4のインターネット接続とIX自身のDNS名前解決が動作する状態を前提とします。
+! .envのIX_SOURCE_IFとIX_NOTIFY_IFを設定してmake ix-configで投入用ファイルを生成できます。
+!
+! <UPDATE_URL>と<SHARED_TOKEN>をIPv6用スタックのURLと共有トークンに置換してください。
+! <SOURCE_IF>をHTTPSのIPv4送信元となる実機のインタフェース名に置換してください。
+! <NOTIFY_IF>をグローバルIPv6アドレスを持つ実機のインタフェース名に置換してください。
+! <IP6>と<PW>はIXのDDNSマクロなので、そのまま残してください。
+!
+configure
+!
+! DDNSを含むHTTPSクライアント機能に共通の設定です。
+service ssl-protocol tls1.2-and-later
+!
+! DDNSを含む対応機能のパスワード表示を暗号化します。
+! この設定で暗号化されたパスワードは、後から平文表示に戻せません。
+service password-encryption
+!
+ddns profile route53-ipv6
+  url <UPDATE_URL>
+  query ip=<IP6>&token=<PW>
+  password plain <SHARED_TOKEN>
+  transport ip
+  source-interface <SOURCE_IF>
+  notify-interface <NOTIFY_IF>
+  update-interval 1
+exit
+ddns enable
+!
+ddns update route53-ipv6
+show ddns route53-ipv6
+!
+! HTTP 200/accepted、AWS側のログ、実際のDNSレコードを確認してください。
+! 確認後、次のコマンドを別途実行して設定を保存してください。
+! write memory
