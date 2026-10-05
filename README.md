@@ -8,7 +8,7 @@ NEC IX → Function URL または WAF + REST API → Lambda → Route 53
                                        Secrets Manager（共有トークン）
 ```
 
-1スタックにつき1つのDNS名・レコード種別を扱います。AとAAAAを両方更新する場合は、スタックとIXのDDNSプロファイルを分けてください。
+1スタックにつき1つのDNS名・レコード種別を扱います。AとAAAAを両方更新する場合や複数拠点を管理する場合は、スタックとIXのDDNSプロファイルを分けてください。単一の設定ファイル（`sites.yaml`）から複数スタックを一括管理することも可能です。
 
 ## 導入
 
@@ -19,7 +19,7 @@ NEC IX → Function URL または WAF + REST API → Lambda → Route 53
 - 同じAWSアカウントのRoute 53パブリックホストゾーンと、そのゾーンへのドメイン委任。
 - IXのWAN接続・ルーティング・DNS名前解決。登録対象はインタフェースに付いたグローバルIPです。CGNAT・DS-Lite・MAP-Eなどの到達性は別途確認してください。
 
-`make init`でPython仮想環境（`.venv`）の作成、依存ツールの導入、`.env`の初期作成をまとめて行えます。
+`make init`でPython仮想環境（`.venv`）の作成、依存ツールの導入、`.env`および`sites.yaml`の初期作成をまとめて行えます。
 
 ```sh
 make init
@@ -31,6 +31,7 @@ make init
 python -m venv .venv
 .venv/Scripts/python.exe -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
+Copy-Item sites.yaml.example sites.yaml
 ```
 
 Linux/macOSでは`.venv/bin/python`を使います。cfn-guardは別途用意し、Makefileの既定パス以外に配置した場合は`CFN_GUARD`で指定してください。
@@ -108,6 +109,81 @@ make ix-config ENV_FILE=.env.ipv6
 ```
 
 `examples/nec-ix-ddns-ipv6.cfg`を生成します。A/AAAAとも、HTTPS通信はIPv4を使います。
+
+## 複数拠点・複数レコードを一括管理する場合
+
+複数の拠点や複数のDNSレコード（IPv4/IPv6の併用など）を運用する場合、1つの構造化ファイル（`sites.yaml`）で一括管理しながら、AWS側は安全にスタック分離（最小権限の原則を維持）して自動デプロイできます。
+
+### 1. 設定ファイル（sites.yaml）を作成する
+
+`sites.yaml.example`を`sites.yaml`にコピーして編集します。YAMLのほか、JSON形式（`.json`）も利用できます。
+
+```sh
+cp sites.yaml.example sites.yaml
+```
+
+```yaml
+# 全サイト共通のデフォルト設定
+defaults:
+  hosted_zone_id: Z0123456789EXAMPLE
+  region: ap-northeast-1
+  record_ttl: 60
+  asn_restriction_enabled: false
+
+# サイト・レコードごとの設定一覧
+sites:
+  tokyo-v4:
+    record_name: tokyo.example.com
+    record_type: A
+    ix_wan_if: GigaEthernet0.1
+
+  tokyo-v6:
+    record_name: tokyo.example.com
+    record_type: AAAA
+    ix_source_if: GigaEthernet0.1
+    ix_notify_if: GigaEthernet1.0
+
+  osaka:
+    stack_name: ixddns-osaka
+    record_name: osaka.example.com
+    record_type: A
+    ix_wan_if: GigaEthernet0.1
+    record_ttl: 120
+    asn_restriction_enabled: true
+    asn_restriction_method: static
+    allowed_asns: "64496,64500"
+```
+
+各サイトの設定は`defaults`の値を継承し、必要な項目だけを上書きできます。`stack_name`を省略した場合は`ixddns-<サイト名>`、コンフィグ出力先は`examples/nec-ix-ddns-<サイト名>.cfg`が自動設定されます。
+
+### 2. 検証・デプロイ・コンフィグ生成
+
+```sh
+# 定義されているサイト一覧を表示
+make list-sites
+
+# 設定ファイルの検証
+make check-sites
+
+# 指定サイトのみデプロイ / コンフィグ生成
+make deploy-sites SITE=tokyo-v4
+make ix-config-sites SITE=tokyo-v4
+
+# 全サイトを一括デプロイ / 一括コンフィグ生成
+make deploy-all
+make ix-config-all
+
+# スタック出力・トークンの確認
+make outputs-sites SITE=tokyo-v4
+make token-sites SITE=tokyo-v4
+```
+
+設定ファイルを別名で管理する場合は`SITES_FILE`で指定できます（例: `make list-sites SITES_FILE=prod-sites.yaml`）。
+
+### スタック分離によるセキュリティ上の利点
+
+手元の設定は1ファイルで管理しつつ、AWS側はサイトごとに独立したスタック（Lambda・IAMロール・Secrets Manager）として展開されます。
+各LambdaのIAMロールは自サイトのレコード名に対する更新権限しか持たないため、万一ある拠点のルータ設定や共有トークンが漏洩しても、他拠点のレコードやドメイン内の別レコードを改ざんされるリスクはありません。
 
 ## 送信元ASNによる制限（任意）
 

@@ -30,6 +30,9 @@ ignore = [
 "tests/test_makefile.py" = ["suspicious-subprocess-import", "subprocess-without-shell-equals-true"]
 # CLI自体は実行せず、CompletedProcessで模擬する試験用の型を参照します。
 "tests/test_ix_config.py" = ["suspicious-subprocess-import"]
+"tests/test_sites.py" = ["suspicious-subprocess-import"]
+# 複数サイトの設定読み込み・CLI実行を行います。
+"scripts/sites.py" = ["suspicious-subprocess-import", "subprocess-without-shell-equals-true", "print"]
 # 接続先はこのファイルの固定HTTPS APIで、利用者からURLを受け取りません。
 "scripts/asn_prefixes.py" = ["suspicious-url-open-usage"]
 # CLIの生成結果・エラーは標準出力と標準エラーへ表示します。

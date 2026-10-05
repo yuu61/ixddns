@@ -8,3 +8,10 @@ __pycache__/
 .env
 .env.*
 !.env.example
+sites.yaml
+sites.yml
+sites.json
+sites.*.yaml
+sites.*.yml
+sites.*.json
+!sites.yaml.example

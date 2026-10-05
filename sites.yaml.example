@@ -1,0 +1,49 @@
+# sites.yaml.example
+# 複数拠点・複数レコードのDDNS設定を一括管理する設定ファイルです。
+# このファイルを sites.yaml にコピーして編集してください。
+#
+# 書式: YAML または JSON（.json）が利用できます。
+# デプロイはスタック分離（1サイト・レコードにつき1スタック）で安全に行われます。
+
+# 全サイト共通のデフォルト設定
+defaults:
+  # 既存のRoute 53パブリックホストゾーンID（例: Z0123456789EXAMPLE）
+  hosted_zone_id: Z0123456789EXAMPLE
+  region: ap-northeast-3
+  aws_profile: ""
+  record_ttl: 60
+  log_retention_days: 30
+  lambda_reserved_concurrency: 1
+  asn_restriction_enabled: false
+  asn_restriction_method: static
+  allowed_asns: ""
+  asn_prefixes_file: ""
+
+# 各サイト・レコードの設定一覧
+# キー名（tokyo-v4, osaka など）は任意の識別子です（英数字、ハイフン、アンダースコア）。
+sites:
+  # 例1: 東京拠点の IPv4（Aレコード）
+  tokyo-v4:
+    record_name: tokyo.example.com
+    record_type: A
+    ix_wan_if: GigaEthernet0.1
+    # stack_name を省略した場合は ixddns-<キー名>（例: ixddns-tokyo-v4）になります
+    # ix_config_output を省略した場合は examples/nec-ix-ddns-<キー名>.cfg になります
+
+  # 例2: 東京拠点の IPv6（AAAAレコード）
+  tokyo-v6:
+    record_name: tokyo.example.com
+    record_type: AAAA
+    ix_source_if: GigaEthernet0.1
+    ix_notify_if: GigaEthernet1.0
+
+  # 例3: 大阪拠点の IPv4（個別設定の上書き例）
+  osaka:
+    stack_name: ixddns-osaka
+    record_name: osaka.example.com
+    record_type: A
+    ix_wan_if: GigaEthernet0.1
+    record_ttl: 120
+    asn_restriction_enabled: true
+    asn_restriction_method: static
+    allowed_asns: "64496,64500"

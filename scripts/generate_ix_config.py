@@ -300,6 +300,20 @@ def config_template(record_type: str) -> Path:
     return PROJECT / "examples" / f"nec-ix-ddns-{family}.cfg.example"
 
 
+def generate_config(settings: Settings) -> Path:
+    """設定からIX用コンフィグを生成して保存する。
+
+    Returns:
+        生成したコンフィグファイルのパス。
+
+    """
+    template = config_template(settings.record_type)
+    replacements = fetch_replacements(settings)
+    content = render_config(template.read_text(encoding="utf-8"), replacements)
+    write_config(settings.output, content)
+    return settings.output
+
+
 def main() -> int:
     """設定とAWS出力からIX用コンフィグを生成し、結果を終了コードで返す。
 
@@ -309,15 +323,12 @@ def main() -> int:
     """
     try:
         settings = Settings.from_environment()
-        template = config_template(settings.record_type)
-        replacements = fetch_replacements(settings)
-        content = render_config(template.read_text(encoding="utf-8"), replacements)
-        write_config(settings.output, content)
+        output = generate_config(settings)
     except (ConfigError, OSError, UnicodeError) as error:
         # ファイル操作エラーにも生成したコンフィグの内容は含めません。
         print(f"生成失敗: {error}", file=sys.stderr)
         return 1
-    print(f"IX用コンフィグを生成しました: {settings.output}")
+    print(f"IX用コンフィグを生成しました: {output}")
     return 0
 
 

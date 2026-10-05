@@ -237,18 +237,36 @@ class MakefileTests(unittest.TestCase):
 
     def test_init_creates_env_file_when_missing(self) -> None:
         target_env = self.directory / "new.env"
-        result = self.invoke("init", f"ENV_FILE={target_env.as_posix()}")
+        target_sites = self.directory / "new.sites.yaml"
+        result = self.invoke(
+            "init",
+            f"ENV_FILE={target_env.as_posix()}",
+            f"SITES_FILE={target_sites.as_posix()}",
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(target_env.exists())
+        self.assertTrue(target_sites.exists())
         self.assertIn("Created", result.stdout)
 
     def test_init_preserves_existing_env_file(self) -> None:
         target_env = self.directory / "existing.env"
+        target_sites = self.directory / "existing.sites.yaml"
         target_env.write_text("HOSTED_ZONE_ID=ZCUSTOM\n", encoding="utf-8")
-        result = self.invoke("init", f"ENV_FILE={target_env.as_posix()}")
+        target_sites.write_text(
+            "defaults:\n  hosted_zone_id: ZCUSTOM\n", encoding="utf-8"
+        )
+        result = self.invoke(
+            "init",
+            f"ENV_FILE={target_env.as_posix()}",
+            f"SITES_FILE={target_sites.as_posix()}",
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             target_env.read_text(encoding="utf-8"), "HOSTED_ZONE_ID=ZCUSTOM\n"
+        )
+        self.assertEqual(
+            target_sites.read_text(encoding="utf-8"),
+            "defaults:\n  hosted_zone_id: ZCUSTOM\n",
         )
         self.assertIn("already exists", result.stdout)
 

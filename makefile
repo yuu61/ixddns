@@ -4,6 +4,9 @@ SHELL := sh
 ENV_FILE ?= .env
 -include $(ENV_FILE)
 
+SITES_FILE ?= sites.yaml
+SITE ?=
+
 AWS ?= aws
 AWS_PROFILE ?=
 REGION ?= ap-northeast-1
@@ -43,6 +46,7 @@ CFN_GUARD ?= cfn-guard
 endif
 
 .PHONY: init venv install-dev build validate test lint guard ruff format check-config check-asn-config check-stack-config deploy outputs token ix-config
+.PHONY: list-sites check-sites deploy-sites deploy-all ix-config-sites ix-config-all outputs-sites token-sites
 
 venv:
 	@if [ ! -d .venv ]; then \
@@ -58,7 +62,13 @@ init: venv
 	else \
 		printf '%s\n' '$(ENV_FILE) already exists (kept).'; \
 	fi
-	@printf '%s\n' 'Initialization complete. Edit $(ENV_FILE) and run "make validate".'
+	@if [ ! -f "$(SITES_FILE)" ]; then \
+		cp sites.yaml.example "$(SITES_FILE)"; \
+		printf '%s\n' 'Created $(SITES_FILE) from sites.yaml.example.'; \
+	else \
+		printf '%s\n' '$(SITES_FILE) already exists (kept).'; \
+	fi
+	@printf '%s\n' 'Initialization complete. Edit $(ENV_FILE) (or $(SITES_FILE)) and run "make validate".'
 
 install-dev:
 	"$(PYTHON)" -m pip install --requirement requirements-dev.txt
@@ -142,3 +152,28 @@ lint: ruff build
 
 guard: lint
 	"$(CFN_GUARD)" validate --rules "$(RULES)" --data "$(TEMPLATE)" --output-format json --show-summary none
+
+list-sites:
+	@"$(PYTHON)" -m scripts.sites --file "$(SITES_FILE)" list
+
+check-sites:
+	@"$(PYTHON)" -m scripts.sites --file "$(SITES_FILE)" check $(if $(SITE),--site "$(SITE)",)
+
+deploy-sites:
+	@"$(PYTHON)" -m scripts.sites --file "$(SITES_FILE)" --aws "$(AWS)" deploy $(if $(SITE),--site "$(SITE)",)
+
+deploy-all:
+	@"$(PYTHON)" -m scripts.sites --file "$(SITES_FILE)" --aws "$(AWS)" deploy
+
+ix-config-sites:
+	@"$(PYTHON)" -m scripts.sites --file "$(SITES_FILE)" --aws "$(AWS)" ix-config $(if $(SITE),--site "$(SITE)",)
+
+ix-config-all:
+	@"$(PYTHON)" -m scripts.sites --file "$(SITES_FILE)" --aws "$(AWS)" ix-config
+
+outputs-sites:
+	@"$(PYTHON)" -m scripts.sites --file "$(SITES_FILE)" --aws "$(AWS)" outputs $(if $(SITE),--site "$(SITE)",)
+
+token-sites:
+	@"$(PYTHON)" -m scripts.sites --file "$(SITES_FILE)" --aws "$(AWS)" token "$(SITE)"
+
