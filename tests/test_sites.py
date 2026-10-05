@@ -400,7 +400,8 @@ sites:
 """
         p = self._write_file("cache_test.yaml", content)
         configs = sites.load_sites_file(p)
-        code = sites.cmd_deploy(configs)
+        with redirect_stdout(io.StringIO()):
+            code = sites.cmd_deploy(configs)
         self.assertEqual(code, 0)
         self.assertEqual(mock_fetch.call_count, 1)
         prefixes_tokyo = self.directory.parents[0] / "asn-prefixes-tokyo.json"

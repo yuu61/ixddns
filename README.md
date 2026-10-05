@@ -8,7 +8,7 @@ NEC IX → Function URL または WAF + REST API → Lambda → Route 53
                                        Secrets Manager（共有トークン）
 ```
 
-1スタックにつき1つのDNS名・レコード種別を扱います。AとAAAAを両方更新する場合や複数拠点を管理する場合は、スタックとIXのDDNSプロファイルを分けてください。単一の設定ファイル（`sites.yaml`）から複数スタックを一括管理することも可能です。
+1レコード（DNS名・種別）ごとに独立したスタック（Lambda・IAMロール・Secrets Manager）として安全に分離デプロイされます。単一レコードの運用でも、複数拠点・複数レコード（IPv4/IPv6併用など）の運用でも、構造化設定ファイル（`sites.yaml`）を**唯一の定義元（Single Source of Truth）**として一元管理します。
 
 ## 導入
 
@@ -36,49 +36,87 @@ Copy-Item sites.yaml.example sites.yaml
 
 Linux/macOSでは`.venv/bin/python`を使います。cfn-guardは別途用意し、Makefileの既定パス以外に配置した場合は`CFN_GUARD`で指定してください。
 
-### 2. AWS側をデプロイする
+### 2. 設定ファイル（sites.yaml）を編集する
 
-`.env`にホストゾーンIDとDNS名を設定します。DNS名は小文字で、末尾の`.`を付けません。値のクォートは不要です。
+DNSレコード・ホストゾーン・IXインタフェース・ASN制限等のインフラ定義は、すべて `sites.yaml` に記述します。
+
+```yaml
+# 全サイト共通のデフォルト設定
+defaults:
+  hosted_zone_id: Z0123456789EXAMPLE
+  region: ap-northeast-1
+  aws_profile: ""
+  record_ttl: 60
+  asn_restriction_enabled: false
+
+# サイト・レコードごとの設定一覧
+sites:
+  # 単一拠点のIPv4更新の例
+  tokyo-v4:
+    record_name: router.example.com
+    record_type: A
+    ix_wan_if: GigaEthernet0.1
+
+  # IPv6も更新する場合は別サイトとして定義
+  tokyo-v6:
+    record_name: router.example.com
+    record_type: AAAA
+    ix_source_if: GigaEthernet0.1
+    ix_notify_if: GigaEthernet1.0
+```
+
+ローカルのAWS実行環境（使用するAWS CLIプロファイルなど）は、必要に応じて `.env` に設定します。レコード定義を `.env` に重複して記述する必要はありません。
 
 ```dotenv
 AWS_PROFILE=my-profile
-HOSTED_ZONE_ID=Z0123456789EXAMPLE
-RECORD_NAME=router.example.com
+REGION=ap-northeast-1
 ```
 
-`AWS_PROFILE`は空欄なら既定の認証設定を使います。主な既定値は、リージョン`ap-northeast-1`、スタック名`ixddns-ipv4`、レコード種別`A`、TTL 60秒、ログ保存30日です。その他の設定は[.env.example](.env.example)を参照してください。
+定義を検証するには `make check` または `make list` を実行します。
 
 ```sh
+# 定義されているサイト一覧と状態を表示
+make list
+
+# 設定内容の検証
+make check
+```
+
+### 3. AWS側をデプロイする
+
+```sh
+# 全サイトを一括デプロイ
 make deploy
+
+# または特定サイトのみをデプロイ
+make deploy SITE=tokyo-v4
 ```
 
-設定・テスト・Ruff・CloudFormationスキーマ・安全性ルールの検証後にデプロイします。同じ`STACK_NAME`で再実行すると更新になります。初回の正常な通知でDNSレコードを作成し、既存レコードがある場合は値とTTLを置き換えます。更新対象はDDNS用の単純なA/AAAAレコードにしてください。
+設定・テスト・Ruff・CloudFormationスキーマ・安全性ルールの検証後にデプロイします。各サイトの `stack_name`（既定値: `ixddns-<サイト名>`）ごとに独立したCloudFormationスタックが作成・更新されます。初回の正常な通知でDNSレコードを作成し、既存レコードがある場合は値とTTLを置き換えます。更新対象はDDNS用の単純なA/AAAAレコードにしてください。
 
-Lambdaの更新権限は、指定ホストゾーン・DNS名・レコード種別の`UPSERT`に限定しています。
+Lambdaの更新権限は、自スタックの指定ホストゾーン・DNS名・レコード種別の`UPSERT`に限定されています。
 
-### 3. IXのコンフィグを生成・投入する
-
-`.env`の`IX_WAN_IF`に、登録するグローバルIPv4を持つインタフェースを指定します。名前は実機の接続方式に合わせてください。
-
-```dotenv
-IX_WAN_IF=GigaEthernet0.1
-```
+### 4. IXのコンフィグを生成・投入する
 
 ```sh
+# 全サイトのコンフィグを一括生成
 make ix-config
+
+# または特定サイトのみ生成
+make ix-config SITE=tokyo-v4
 ```
 
-デプロイ済みスタックのURLと共有トークンを取得し、`examples/nec-ix-ddns-ipv4.cfg`を生成します。実行するAWS認証には`cloudformation:DescribeStacks`と対象シークレットの`secretsmanager:GetSecretValue`が必要です。`.env`とスタックの設定が一致しない場合は生成を停止するため、AWS側の設定変更は先にデプロイしてください。
+デプロイ済みスタックのURLと共有トークンを取得し、`examples/nec-ix-ddns-<サイト名>.cfg`を生成します。実行するAWS認証には`cloudformation:DescribeStacks`と対象シークレットの`secretsmanager:GetSecretValue`が必要です。
 
 生成ファイルを確認し、Administrator権限のオペレーションモードからIXへ投入します。グローバルコンフィグモードから投入する場合は先頭の`configure`を省いてください。
 
-- 生成ファイルには平文の共有トークンが含まれます。既定の保存先はGit除外対象です。`IX_CONFIG_OUTPUT`で変更する場合も除外対象のパスを使ってください。再生成時は上書きします。
+- 生成ファイルには平文の共有トークンが含まれます。既定の保存先（`examples/*.cfg`）はGit除外対象です。`ix_config_output`で変更する場合も除外対象のパスを使ってください。再生成時は上書きします。
 - サンプルの`service ssl-protocol`は他のHTTPSクライアント機能にも影響します。`service password-encryption`で暗号化したパスワードは平文表示へ戻せません。
 - `<IP4>`・`<IP6>`・`<PW>`はIXが置換するマクロなので、そのまま残してください。
 
 サンプルはIX2000/IX3000のVer.10.11-1.1のマニュアルに基づきます。実機への投入・接続試験は未実施です。[IPv4サンプル](examples/nec-ix-ddns-ipv4.cfg.example)、[IPv6サンプル](examples/nec-ix-ddns-ipv6.cfg.example)も参照してください。
 
-### 4. 更新を確認する
+### 5. 更新を確認する
 
 生成コンフィグの`ddns update`で初回通知を行い、`show ddns`、AWS側のログ、実際のDNSレコードを確認します。確認後、グローバルコンフィグモードで`write memory`を実行して保存してください。
 
@@ -90,142 +128,63 @@ Resolve-DnsName router.example.com -Type A
 
 通知は監視対象インタフェースのIP変更から約10秒後、変更がなくてもサンプル設定では1時間ごとに実行します。`ddns update`なら即時通知できます。IPが変わらないリンク復旧時の即時通知は、参照資料では確認できません。
 
-## IPv6を更新する場合
-
-別の設定ファイル（例：`.env.ipv6`）で、スタック名とレコード種別を変更します。
-
-```dotenv
-STACK_NAME=ixddns-ipv6
-RECORD_TYPE=AAAA
-IX_SOURCE_IF=GigaEthernet0.1
-IX_NOTIFY_IF=GigaEthernet1.0
-```
-
-`IX_SOURCE_IF`はHTTPSのIPv4送信元、`IX_NOTIFY_IF`は登録するグローバルIPv6を持つインタフェースです。同じインタフェースでも構いません。通知時に`<IP6>`は監視対象の先頭のグローバルIPv6へ置換されます。
+### 6. 出力とトークンの確認
 
 ```sh
-make deploy ENV_FILE=.env.ipv6
-make ix-config ENV_FILE=.env.ipv6
+# スタック出力（URLやリソースARN等）の確認
+make outputs SITE=tokyo-v4
+
+# 共有トークン（半角英数字）のみの取得・表示
+make token SITE=tokyo-v4
 ```
 
-`examples/nec-ix-ddns-ipv6.cfg`を生成します。A/AAAAとも、HTTPS通信はIPv4を使います。
+## 複数拠点・複数回線の管理
 
-## 複数拠点・複数レコードを一括管理する場合
-
-複数の拠点や複数のDNSレコード（IPv4/IPv6の併用など）を運用する場合、1つの構造化ファイル（`sites.yaml`）で一括管理しながら、AWS側は安全にスタック分離（最小権限の原則を維持）して自動デプロイできます。
-
-### 1. 設定ファイル（sites.yaml）を作成する
-
-`sites.yaml.example`を`sites.yaml`にコピーして編集します。YAMLのほか、JSON形式（`.json`）も利用できます。
-
-```sh
-cp sites.yaml.example sites.yaml
-```
+複数拠点で異なる契約回線（ISP/プロバイダ）を使う場合、拠点ごとに接続元ASNが変わります。
+`sites.yaml` では、サイトごとに `allowed_asns` を指定することで、**「東京拠点は東京の回線ASNからのみ許可、大阪拠点は大阪の回線ASNからのみ許可」** という拠点ごとの厳格なアクセス制御が可能です。
 
 ```yaml
-# 全サイト共通のデフォルト設定
 defaults:
   hosted_zone_id: Z0123456789EXAMPLE
-  region: ap-northeast-1
-  record_ttl: 60
-  asn_restriction_enabled: false
+  asn_restriction_enabled: true
+  asn_restriction_method: static
 
-# サイト・レコードごとの設定一覧
-sites:
-  tokyo-v4:
-    record_name: tokyo.example.com
-    record_type: A
-    ix_wan_if: GigaEthernet0.1
-
-  tokyo-v6:
-    record_name: tokyo.example.com
-    record_type: AAAA
-    ix_source_if: GigaEthernet0.1
-    ix_notify_if: GigaEthernet1.0
-
-  osaka:
-    stack_name: ixddns-osaka
-    record_name: osaka.example.com
-    record_type: A
-    ix_wan_if: GigaEthernet0.1
-    record_ttl: 120
-    asn_restriction_enabled: true
-    asn_restriction_method: static
-    allowed_asns: "64496,64500"
-```
-
-各サイトの設定は`defaults`の値を継承し、必要な項目だけを上書きできます。`stack_name`を省略した場合は`ixddns-<サイト名>`、コンフィグ出力先は`examples/nec-ix-ddns-<サイト名>.cfg`が自動設定されます。
-
-### 2. 検証・デプロイ・コンフィグ生成
-
-```sh
-# 定義されているサイト一覧を表示
-make list-sites
-
-# 設定ファイルの検証
-make check-sites
-
-# 指定サイトのみデプロイ / コンフィグ生成
-make deploy-sites SITE=tokyo-v4
-make ix-config-sites SITE=tokyo-v4
-
-# 全サイトを一括デプロイ / 一括コンフィグ生成
-make deploy-all
-make ix-config-all
-
-# スタック出力・トークンの確認
-make outputs-sites SITE=tokyo-v4
-make token-sites SITE=tokyo-v4
-```
-
-設定ファイルを別名で管理する場合は`SITES_FILE`で指定できます（例: `make list-sites SITES_FILE=prod-sites.yaml`）。
-
-### 拠点ごとにプロバイダ（ASN）が異なる場合
-
-複数拠点では、拠点ごとに契約回線（ISP/プロバイダ）が異なり、送信元ASNが変わることが一般的です。
-各サイト定義で `allowed_asns` を個別に指定することで、**「東京スタックへの更新は東京拠点の回線ASNからのみ許可し、大阪スタックへの更新は大阪拠点の回線ASNからのみ許可する」** という厳格な拠点別アクセス制御が可能です。
-
-```yaml
 sites:
   tokyo:
     record_name: tokyo.example.com
     ix_wan_if: GigaEthernet0.1
-    asn_restriction_enabled: true
-    asn_restriction_method: static
     allowed_asns: [64496] # 東京拠点のISPのASN
 
   osaka:
     record_name: osaka.example.com
     ix_wan_if: GigaEthernet0.1
-    asn_restriction_enabled: true
-    asn_restriction_method: static
     allowed_asns: [64500, 64501] # 大阪拠点の主回線・予備回線のASN
 ```
 
-- `allowed_asns` はリスト形式 `[64496, 64500]`、単一値 `64496`、文字列 `"64496,64500"` のいずれも記述できます。
-- `make list-sites` で各拠点のASN制限状態（`static:64496` や `disabled` など）を一覧で確認できます。
-- `static` 方式での一括デプロイ時（`make deploy-all`）、複数拠点で同一のASNが使われていてもビルドキャッシュによりRIPEstatへの重複アクセスを自動抑止します。
+- `allowed_asns` はリスト形式 `[64496, 64500]`、単一値 `64496`、文字列 `"64496,64500"` のいずれも指定可能です。
+- `static` 方式での一括デプロイ時（`make deploy`）、複数拠点で同一のASNが使われていてもビルドキャッシュによりRIPEstatへの重複アクセスを自動抑止します。
 
 ### スタック分離によるセキュリティ上の利点
 
-手元の設定は1ファイルで管理しつつ、AWS側はサイトごとに独立したスタック（Lambda・IAMロール・Secrets Manager）として展開されます。
+手元の設定は `sites.yaml` 1ファイルで管理しつつ、AWS側はサイトごとに独立したスタック（Lambda・IAMロール・Secrets Manager）として展開されます。
 各LambdaのIAMロールは自サイトのレコード名に対する更新権限しか持たないため、万一ある拠点のルータ設定や共有トークンが漏洩しても、他拠点のレコードやドメイン内の別レコードを改ざんされるリスクはありません。
 
 ## 送信元ASNによる制限（任意）
 
-共有トークン認証は全方式で必要です。ASN制限を追加する場合は次のように設定します。
+共有トークン認証は全方式で必要です。送信元制限を追加する場合は `sites.yaml` で次のように設定します。
 
-```dotenv
-ASN_RESTRICTION_ENABLED=true
-ASN_RESTRICTION_METHOD=static
-ALLOWED_ASNS=64496,64500
+```yaml
+defaults:
+  asn_restriction_enabled: true
+  asn_restriction_method: static
+  allowed_asns: [64496, 64500]
 ```
 
 ASNは例示用です。実際のHTTPS送信回線のASNに置き換えてください。`AS`接頭辞を付けず、重複や0を含まない1〜100個の整数を指定します。
 
 | 設定 | 送信元判定 | 追加サービスの料金 |
 | --- | --- | --- |
-| `ASN_RESTRICTION_ENABLED=false`（標準） | 制限なし、Function URLを使用 | Function URL自体の追加料金なし |
+| `asn_restriction_enabled: false`（標準） | 制限なし、Function URLを使用 | Function URL自体の追加料金なし |
 | `true` / `static`（推奨） | デプロイ時のASNの起点CIDRをLambdaで照合 | Function URL自体の追加料金なし |
 | `true` / `waf` | REST APIとAWS WAFでASN・送信元IPごとの流量を検査 | API Gateway・WAFの料金が追加 |
 
@@ -233,9 +192,9 @@ ASNは例示用です。実際のHTTPS送信回線のASNに置き換えてくだ
 
 ### static方式の運用
 
-ビルド時にRIPEstatから起点CIDRを取得し、Lambdaへ埋め込みます。一覧は`.build/asn-prefixes.json`にも保存します。取得失敗、空・不正・欠落した経路、48時間より古い観測、テンプレートの容量超過ではビルドを停止し、古い一覧へ自動フォールバックしません。
+ビルド時にRIPEstatから起点CIDRを取得し、Lambdaへ埋め込みます。一覧は`.build/asn-prefixes-<サイト名>.json`にも保存します。取得失敗、空・不正・欠落した経路、48時間より古い観測、テンプレートの容量超過ではビルドを停止し、古い一覧へ自動フォールバックしません。
 
-**CIDR一覧は次のデプロイまで更新されません。** 経路変更に追従するため定期的に`make deploy`を実行してください。48時間の検査はビルド時だけで、稼働中のLambdaを停止する期限ではありません。通常は`ASN_PREFIXES_FILE`を空欄にして新しく取得します。取得済みJSONを指定する場合も、ASNの一致と取得・観測から48時間以内であることを検証します。
+**CIDR一覧は次のデプロイまで更新されません。** 経路変更に追従するため定期的に`make deploy`を実行してください。48時間の検査はビルド時だけで、稼働中のLambdaを停止する期限ではありません。通常は`asn_prefixes_file`を空欄にして新しく取得します。取得済みJSONを指定する場合も、ASNの一致と取得・観測から48時間以内であることを検証します。
 
 判定には通信の送信元IPを使い、転送ヘッダーや登録対象の`ip`は使いません。RIPEstatの観測経路はASNの全保有アドレスやWAFの判定との一致を保証せず、広いCIDRに含まれる別ASNの経路や同じASNの他の利用者も許可範囲に入ります。
 
@@ -245,7 +204,7 @@ ASNは例示用です。実際のHTTPS送信回線のASNに置き換えてくだ
 
 **waf方式との切り替え、または旧HTTP API構成からFunction URLへの移行では更新URLが変わります。** `make deploy`後に`make ix-config`を再実行してIXへ投入し、更新を確認してください。制限なしとstatic間の切り替えでは同じURLを使います。共有トークンは移行で変更しません。
 
-方式指定がなかった従来のASN制限付き設定は、未指定のままでは`static`になります。WAFを維持する場合は`ASN_RESTRICTION_METHOD=waf`を明示してください。旧HTTP APIのアクセスログは移行後も残り、不要なら個別に削除します。
+方式指定がなかった従来のASN制限付き設定は、未指定のままでは`static`になります。WAFを維持する場合は`asn_restriction_method: waf`を明示してください。旧HTTP APIのアクセスログは移行後も残り、不要なら個別に削除します。
 
 ## エラーの確認
 
@@ -262,37 +221,3 @@ ASNは例示用です。実際のHTTPS送信回線のASNに置き換えてくだ
 | `503` | シークレット取得・Route 53更新の失敗、またはstatic一覧の不備 |
 
 Lambdaログの`ddns_update_accepted`、`ddns_update_failed`、`ddns_source_rejected`で確認します。WAFの遮断理由は`make outputs`の`WafLogGroup`を参照してください。APIアクセスログは作成せず、Lambdaログ・メトリクスとWAFログを使います。トークンやクエリ全体はログに記録しません。
-
-`make outputs`で更新URLとシークレットのARN、`make token`でトークンを取得できます。`make token`は秘密情報を画面に表示するため、出力を共有ログに保存しないでください。トークンを変更した場合はIXのパスワードも更新します。
-
-## 開発・検証
-
-CloudFormation定義は[cloudformation.yaml](cloudformation.yaml)と[infrastructure/](infrastructure/)に分割し、[ビルドスクリプト](scripts/build_template.py)で[Lambdaコード](lambda/index.py)とCIDR一覧を埋め込んだ`.build/template.json`に結合します。デプロイはこの1テンプレートを使い、S3へのコード配置・SAM・CDK・npmは不要です。
-
-| コマンド | 内容 |
-| --- | --- |
-| `make init` | 仮想環境作成・開発用依存導入・`.env`作成 |
-| `make` / `make validate` | テスト・Ruff・スキーマ・安全性ルールの検証 |
-| `make test` | AWS・RIPEstatへの通信なしで単体テスト |
-| `make build` | テンプレート生成 |
-| `make ruff` / `make format` | Pythonの検査 / 自動修正・整形 |
-| `make lint` / `make guard` | スキーマ検証 / 安全性ルールも検証 |
-| `make install-dev` | 既存の仮想環境へ開発用依存を導入 |
-
-static制限を有効にしたビルド・検証はRIPEstatへ接続します。ローカル検証ではAWSの権限・クォータや実機のHTTPS互換性までは確認できないため、デプロイ後の更新確認が必要です。
-
-ツールは[requirements-dev.txt](requirements-dev.txt)で固定し、`PYTHON`・`CFN_LINT`・`CFN_GUARD`で実行パスを変更できます。Ruffはプレビューを含む全ルールを有効にし、行単位の抑制は使いません。例外と理由は[ruff.toml](ruff.toml)、構成固有の安全性ルールは[security.guard](security.guard)を参照してください。
-
-設定ファイルは`ENV_FILE`で切り替えられます。コマンドライン指定は設定ファイルより優先されます（例：`make deploy RECORD_TTL=120`）。
-
-## 削除時の扱い
-
-スタック削除でAPI・Lambda・IAMロールは削除されます。ホストゾーン・更新済みDNSレコード・共有トークン・ログは残るため、不要なものは個別に削除してください。DNS名やレコード種別を変更した場合も、以前のレコードは自動削除されません。
-
-## 参照
-
-- [NEC: DDNS FAQ](https://jpn.nec.com/univerge/ix/faq/ddns.html)
-- NEC IX2000/IX3000 機能説明書 Ver.10.11-1.1 §2.25、コマンドリファレンスのDDNS・SSL関連コマンド。
-- [AWS: Route 53更新API](https://docs.aws.amazon.com/Route53/latest/APIReference/API_ChangeResourceRecordSets.html)、[レコード単位のIAM条件](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html)
-- [AWS: Function URLのアクセス制御](https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html)、[流量制限](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html#urls-throttling)
-- [RIPEstat: RIS Prefixes](https://stat.ripe.net/docs/data-api/api-endpoints/ris-prefixes)

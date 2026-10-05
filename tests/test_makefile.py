@@ -1,5 +1,6 @@
-"""模擬AWS CLIでデプロイ設定を検証する。実際のAWSには接続しない。"""
+"""模擬AWS CLIとsites.yamlでMakefileターゲットを検証する。"""
 
+import ctypes
 import json
 import os
 import shlex
@@ -10,15 +11,30 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from test_asn_prefixes import snapshot
+import yaml
+
+from tests.test_asn_prefixes import snapshot
 
 PROJECT = Path(__file__).resolve().parents[1]
 MAKE = shutil.which("make")
 
 
+def _restore_console_mode() -> None:
+    """Windows コンソールの出力処理・VT処理フラグを復元する。"""
+    if sys.platform != "win32":
+        return
+    kernel32 = ctypes.windll.kernel32
+    # 標準出力と標準エラー出力のハンドルを取得する。
+    for handle_id in (-11, -12):
+        handle = kernel32.GetStdHandle(handle_id)
+        mode = ctypes.c_ulong()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x7)
+
+
 @unittest.skipUnless(MAKE and shutil.which("sh"), "GNU Make and sh are required")
 class MakefileTests(unittest.TestCase):
-    """設定ファイルとMakeからAWS CLIへ渡す引数を検証する。"""
+    """sites.yamlとMakeからAWS CLIや各スクリプトへ渡す引数を検証する。"""
 
     def setUp(self) -> None:
         build_directory = PROJECT / ".build"
@@ -31,51 +47,132 @@ class MakefileTests(unittest.TestCase):
             message = "Test directory is outside the project's build directory"
             raise RuntimeError(message)
         self.addCleanup(temporary.cleanup)
-        self.config = self.directory / "config.env"
+
+        self.env_file = self.directory / "test.env"
+        self.sites_file = self.directory / "test_sites.yaml"
         self.log = self.directory / "aws-calls.jsonl"
-        self.values = {
-            "AWS_PROFILE": "profile with spaces",
-            "REGION": "ap-northeast-1",
-            "STACK_NAME": "ixddns-test",
-            "HOSTED_ZONE_ID": "ZEXAMPLE",
-            "RECORD_NAME": "router.example.com",
-            "RECORD_TYPE": "A",
-            "RECORD_TTL": "120",
-            "LOG_RETENTION_DAYS": "14",
-            "LAMBDA_RESERVED_CONCURRENCY": "3",
-            "ASN_RESTRICTION_ENABLED": "false",
-            "ASN_RESTRICTION_METHOD": "static",
-            "ASN_PREFIXES_FILE": "",
-            "ALLOWED_ASNS": "",
+        self.output_cfg = self.directory / "router.cfg"
+        self.asn_prefixes_file = self.directory / "prefixes.json"
+        snap = snapshot()
+        snap["asns"] = [64496]
+        snap["query_times"] = {"64496": snap["fetched_at"]}
+        self.asn_prefixes_file.write_text(json.dumps(snap), encoding="utf-8")
+
+        self.sites_data = {
+            "defaults": {
+                "hosted_zone_id": "ZEXAMPLE",
+                "region": "ap-northeast-1",
+                "aws_profile": "profile with spaces",
+                "record_ttl": 120,
+                "log_retention_days": 14,
+                "lambda_reserved_concurrency": 3,
+                "asn_restriction_enabled": False,
+                "asn_restriction_method": "static",
+                "allowed_asns": "",
+                "asn_prefixes_file": "",
+            },
+            "sites": {
+                "tokyo-v4": {
+                    "stack_name": "ixddns-tokyo",
+                    "record_name": "tokyo.example.com",
+                    "record_type": "A",
+                    "ix_wan_if": "GigaEthernet0.1",
+                    "ix_config_output": str(self.output_cfg),
+                },
+                "osaka-v4": {
+                    "stack_name": "ixddns-osaka",
+                    "record_name": "osaka.example.com",
+                    "record_type": "A",
+                    "ix_wan_if": "GigaEthernet0.1",
+                    "asn_restriction_enabled": True,
+                    "allowed_asns": [64496],
+                    "asn_prefixes_file": str(self.asn_prefixes_file),
+                },
+            },
         }
+
         stub_python = self.directory / "aws_stub.py"
-        stub_python.write_text(
-            "import json, os, sys\n"
-            "from pathlib import Path\n"
-            "args = sys.argv[1:]\n"
-            f"with Path({str(self.log)!r}).open('a', encoding='utf-8') as stream:\n"
-            "    stream.write(json.dumps({'args': args, "
-            "'profile': os.environ.get('AWS_PROFILE')}) + '\\n')\n"
-            "if 'describe-stacks' in args:\n"
-            "    if any('TokenSecretArn' in value for value in args):\n"
-            "        print(os.environ.get('FAKE_TOKEN_ARN', "
-            "'arn:aws:secretsmanager:test:secret:example'))\n"
-            "    else:\n"
-            "        print('fake stack outputs')\n"
-            "elif 'get-secret-value' in args:\n"
-            "    print(json.dumps({'token': 'fake-test-token'}))\n",
-            encoding="utf-8",
+        log_path_repr = repr(str(self.log))
+        stub_lines = (
+            "import json, os, sys\n",
+            "from pathlib import Path\n",
+            "args = sys.argv[1:]\n",
+            f"with Path({log_path_repr}).open('a', encoding='utf-8') as stream:\n",
+            (
+                "    stream.write(json.dumps({'args': args, "
+                "'profile': os.environ.get('AWS_PROFILE')}) + '\\n')\n"
+            ),
+            "if 'describe-stacks' in args:\n",
+            (
+                "    token_arn = os.environ.get('FAKE_TOKEN_ARN', "
+                "'arn:aws:secretsmanager:test:secret:example')\n"
+            ),
+            (
+                "    stack_idx = "
+                "args.index('--stack-name') + 1 if '--stack-name' in args else -1\n"
+            ),
+            "    st_name = args[stack_idx] if stack_idx > 0 else 'ixddns-tokyo'\n",
+            (
+                "    rec_name = "
+                "'osaka.example.com' if 'osaka' in st_name else 'tokyo.example.com'\n"
+            ),
+            "    asn_en = 'true' if 'osaka' in st_name else 'false'\n",
+            (
+                "    outputs = [{'OutputKey': 'UpdateUrl', "
+                "'OutputValue': 'https://example.lambda-url.ap-northeast-1.on.aws/update'}]\n"
+            ),
+            "    if token_arn != 'None':\n",
+            (
+                "        outputs.append({'OutputKey': 'TokenSecretArn', "
+                "'OutputValue': token_arn})\n"
+            ),
+            "    params = [\n",
+            "        {'ParameterKey': 'RecordType', 'ParameterValue': 'A'},\n",
+            "        {'ParameterKey': 'RecordName', 'ParameterValue': rec_name},\n",
+            "        {'ParameterKey': 'HostedZoneId', 'ParameterValue': 'ZEXAMPLE'},\n",
+            (
+                "        {'ParameterKey': 'AsnRestrictionEnabled', "
+                "'ParameterValue': asn_en},\n"
+            ),
+            (
+                "        {'ParameterKey': 'AsnRestrictionMethod', "
+                "'ParameterValue': 'static'},\n"
+            ),
+            "        {'ParameterKey': 'AllowedAsns', 'ParameterValue': '64496'},\n",
+            "    ]\n",
+            (
+                "    print(json.dumps({'Stacks': "
+                "[{'Outputs': outputs, 'Parameters': params}]}))\n"
+            ),
+            "elif 'get-secret-value' in args:\n",
+            (
+                "    print(json.dumps({'SecretString': "
+                "json.dumps({'token': 'FakeTestToken12345'})}))\n"
+            ),
         )
-        self.aws = self.directory / "aws-mock.sh"
-        self.aws.write_text(
-            "#!/bin/sh\nexec "
-            + shlex.quote(Path(sys.executable).as_posix())
-            + " "
-            + shlex.quote(stub_python.as_posix())
-            + ' "$@"\n',
-            encoding="utf-8",
-        )
-        self.aws.chmod(0o755)
+        stub_python.write_text("".join(stub_lines), encoding="utf-8")
+        if os.name == "nt":
+            self.aws = self.directory / "aws-mock.cmd"
+            self.aws.write_text(
+                f'@echo off\n"{sys.executable}" "{stub_python}" %*\n',
+                encoding="utf-8",
+            )
+        else:
+            self.aws = self.directory / "aws-mock.sh"
+            self.aws.write_text(
+                "#!/bin/sh\nexec "
+                + shlex.quote(Path(sys.executable).as_posix())
+                + " "
+                + shlex.quote(stub_python.as_posix())
+                + ' "$@"\n',
+                encoding="utf-8",
+            )
+            self.aws.chmod(0o755)
+
+    def write_sites(self, data: dict[str, object] | None = None) -> None:
+        """sites.yaml を書き出す。"""
+        content = yaml.dump(data or self.sites_data)
+        self.sites_file.write_text(content, encoding="utf-8")
 
     def invoke(
         self,
@@ -83,35 +180,51 @@ class MakefileTests(unittest.TestCase):
         *overrides: str,
         extra_environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        self.config.write_text(
-            "\n".join(f"{key}={value}" for key, value in self.values.items()) + "\n",
-            encoding="utf-8",
-        )
+        """Makefile ターゲットを実行する。
+
+        Returns:
+            make コマンドの実行結果。
+
+        """
+        if not self.sites_file.exists():
+            self.write_sites()
         environment = os.environ.copy()
         environment.pop("MAKEFLAGS", None)
         environment.pop("MFLAGS", None)
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONIOENCODING"] = "utf-8"
         environment.update(extra_environment or {})
-        # 検証全体は別途実行するため、このテストの再帰実行を避けます。
-        return subprocess.run(
-            [
-                MAKE,
-                "--no-print-directory",
-                "--old-file=validate",
-                target,
-                f"ENV_FILE={self.config.as_posix()}",
-                f"AWS={self.aws.as_posix()}",
-                *overrides,
-            ],
-            cwd=PROJECT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            return subprocess.run(
+                [
+                    MAKE,
+                    "--no-print-directory",
+                    target,
+                    f"ENV_FILE={self.env_file.as_posix()}",
+                    f"SITES_FILE={self.sites_file.as_posix()}",
+                    f"AWS={self.aws.as_posix()}",
+                    *overrides,
+                ],
+                cwd=PROJECT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+                check=False,
+            )
+        finally:
+            _restore_console_mode()
 
     def calls(self) -> list[dict[str, object]]:
+        """AWS CLI 呼び出しログを取得する。
+
+        Returns:
+            実行された AWS CLI 呼び出しの引数一覧。
+
+        """
         if not self.log.exists():
             return []
         return [
@@ -119,123 +232,112 @@ class MakefileTests(unittest.TestCase):
             for line in self.log.read_text(encoding="utf-8").splitlines()
         ]
 
-    def test_deploy_uses_env_and_command_line_overrides_without_splitting_profile(
-        self,
-    ) -> None:
-        result = self.invoke("deploy", "RECORD_NAME=override.example.com")
+    def test_list_displays_all_sites(self) -> None:
+        result = self.invoke("list")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("tokyo-v4", result.stdout)
+        self.assertIn("osaka-v4", result.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_check_succeeds_with_valid_config(self) -> None:
+        result = self.invoke("check")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("設定ファイルは正常です", result.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_check_fails_with_invalid_config(self) -> None:
+        self.sites_data["sites"]["tokyo-v4"]["record_name"] = "INVALID_NAME"
+        self.write_sites()
+        result = self.invoke("check")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("record_name", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_deploy_single_site_passes_correct_parameters(self) -> None:
+        result = self.invoke("deploy", "SITE=tokyo-v4")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
         self.assertEqual(len(calls), 1)
         args = calls[0]["args"]
         self.assertEqual(args[args.index("--profile") + 1], "profile with spaces")
-        self.assertEqual(args[args.index("--stack-name") + 1], "ixddns-test")
-        self.assertEqual(
-            args[args.index("--parameter-overrides") + 1 :],
-            [
-                "HostedZoneId=ZEXAMPLE",
-                "RecordName=override.example.com",
-                "RecordType=A",
-                "RecordTTL=120",
-                "LogRetentionDays=14",
-                "LambdaReservedConcurrency=3",
-                "AsnRestrictionEnabled=false",
-                "AsnRestrictionMethod=static",
-                "AllowedAsns=0",
-            ],
-        )
+        self.assertEqual(args[args.index("--stack-name") + 1], "ixddns-tokyo")
+        overrides = args[args.index("--parameter-overrides") + 1 :]
+        self.assertIn("HostedZoneId=ZEXAMPLE", overrides)
+        self.assertIn("RecordName=tokyo.example.com", overrides)
+        self.assertIn("RecordType=A", overrides)
+        self.assertIn("RecordTTL=120", overrides)
+        self.assertIn("LogRetentionDays=14", overrides)
+        self.assertIn("LambdaReservedConcurrency=3", overrides)
+        self.assertIn("AsnRestrictionEnabled=false", overrides)
+        self.assertIn("AllowedAsns=0", overrides)
 
-    def test_missing_required_settings_stop_before_any_aws_call(self) -> None:
-        for key in ("HOSTED_ZONE_ID", "RECORD_NAME"):
-            with self.subTest(key=key):
-                result = self.invoke("deploy", f"{key}=")
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(key, result.stderr)
-                self.assertEqual(self.calls(), [])
-
-    def test_blank_profile_uses_default_credential_chain(self) -> None:
-        result = self.invoke("outputs", "AWS_PROFILE=")
+    def test_deploy_blank_profile_omits_profile_flag(self) -> None:
+        self.sites_data["defaults"]["aws_profile"] = ""
+        self.write_sites()
+        result = self.invoke("deploy", "SITE=tokyo-v4")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         call = self.calls()[0]
         self.assertNotIn("--profile", call["args"])
-        self.assertIsNone(call["profile"])
-        self.assertEqual(
-            call["args"][call["args"].index("--stack-name") + 1], "ixddns-test"
-        )
 
-    def test_token_uses_secret_arn_from_the_configured_stack(self) -> None:
+    def test_deploy_with_asn_restriction(self) -> None:
+        result = self.invoke("deploy", "SITE=osaka-v4")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)
+        args = calls[0]["args"]
+        overrides = args[args.index("--parameter-overrides") + 1 :]
+        self.assertIn("AsnRestrictionEnabled=true", overrides)
+        self.assertIn("AllowedAsns=64496", overrides)
+
+    def test_deploy_all_deploys_each_site(self) -> None:
+        result = self.invoke("deploy")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertEqual(len(calls), 2)
+        stack_names = [
+            call["args"][call["args"].index("--stack-name") + 1] for call in calls
+        ]
+        self.assertEqual(sorted(stack_names), ["ixddns-osaka", "ixddns-tokyo"])
+
+    def test_outputs_invokes_describe_stacks(self) -> None:
+        result = self.invoke("outputs", "SITE=tokyo-v4")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("describe-stacks", calls[0]["args"])
+        self.assertIn("UpdateUrl", result.stdout)
+
+    def test_token_requires_site(self) -> None:
         result = self.invoke("token")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Specify SITE=<site_id>", result.stderr)
+        self.assertEqual(self.calls(), [])
+
+    def test_token_retrieves_secret(self) -> None:
+        result = self.invoke("token", "SITE=tokyo-v4")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
         self.assertEqual(len(calls), 2)
         self.assertIn("describe-stacks", calls[0]["args"])
-        args = calls[1]["args"]
-        self.assertIn("get-secret-value", args)
-        self.assertEqual(
-            args[args.index("--secret-id") + 1],
-            "arn:aws:secretsmanager:test:secret:example",
-        )
-        self.assertEqual(json.loads(result.stdout), {"token": "fake-test-token"})
+        self.assertIn("get-secret-value", calls[1]["args"])
+        self.assertEqual(result.stdout.strip(), "FakeTestToken12345")
 
-    def test_missing_secret_arn_stops_before_secret_read(self) -> None:
-        result = self.invoke("token", extra_environment={"FAKE_TOKEN_ARN": "None"})
+    def test_token_fails_when_secret_arn_missing(self) -> None:
+        result = self.invoke(
+            "token", "SITE=tokyo-v4", extra_environment={"FAKE_TOKEN_ARN": "None"}
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("TokenSecretArn", result.stderr)
-        self.assertEqual(len(self.calls()), 1)
 
-    def test_ix_config_requires_interfaces_before_any_aws_call(self) -> None:
-        result = self.invoke("ix-config", "IX_WAN_IF=")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("IX_WAN_IF", result.stderr)
-        self.assertEqual(self.calls(), [])
-
-    def test_deploy_passes_enabled_asns_as_one_argument(self) -> None:
-        result = self.invoke(
-            "deploy",
-            "ASN_RESTRICTION_ENABLED=true",
-            "ASN_RESTRICTION_METHOD=waf",
-            "ALLOWED_ASNS=64496, 64500",
-        )
+    def test_ix_config_generates_config(self) -> None:
+        result = self.invoke("ix-config", "SITE=tokyo-v4")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        args = self.calls()[0]["args"]
-        self.assertIn("AsnRestrictionEnabled=true", args)
-        self.assertIn("AsnRestrictionMethod=waf", args)
-        self.assertIn("AllowedAsns=64496, 64500", args)
+        self.assertTrue(self.output_cfg.exists())
+        content = self.output_cfg.read_text(encoding="utf-8")
+        self.assertIn("FakeTestToken12345", content)
+        self.assertIn("GigaEthernet0.1", content)
 
-    def test_invalid_or_empty_asn_settings_stop_before_any_aws_call(self) -> None:
-        for overrides in (
-            ("ASN_RESTRICTION_ENABLED=tru",),
-            ("ASN_RESTRICTION_METHOD=statc",),
-            ("ASN_RESTRICTION_ENABLED=true", "ALLOWED_ASNS="),
-            ("ASN_RESTRICTION_ENABLED=true", "ALLOWED_ASNS=0"),
-            ("ASN_RESTRICTION_ENABLED=true", "ALLOWED_ASNS=AS64496"),
-        ):
-            with self.subTest(overrides=overrides):
-                result = self.invoke("deploy", *overrides)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(self.calls(), [])
-
-    def test_disabled_asn_restriction_ignores_the_allow_list(self) -> None:
-        result = self.invoke("deploy", "ALLOWED_ASNS=64496")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("AllowedAsns=0", self.calls()[0]["args"])
-
-    def test_static_build_uses_the_env_snapshot_without_aws_calls(self) -> None:
-        source = self.directory / "input.json"
-        output = self.directory / "template.json"
-        source.write_text(json.dumps(snapshot()), encoding="utf-8")
-        self.values.update(
-            ASN_RESTRICTION_ENABLED="true",
-            ALLOWED_ASNS="3333",
-            ASN_PREFIXES_FILE=source.as_posix(),
-        )
-        result = self.invoke("build", f"TEMPLATE={output.as_posix()}")
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        code = json.loads(output.read_text(encoding="utf-8"))["Resources"][
-            "UpdateFunction"
-        ]["Properties"]["Code"]["ZipFile"]
-        self.assertNotIn('ASN_SNAPSHOT_DATA = ""', code)
-
-    def test_init_creates_env_file_when_missing(self) -> None:
+    def test_init_creates_env_and_sites_file_when_missing(self) -> None:
         target_env = self.directory / "new.env"
         target_sites = self.directory / "new.sites.yaml"
         result = self.invoke(
@@ -248,10 +350,10 @@ class MakefileTests(unittest.TestCase):
         self.assertTrue(target_sites.exists())
         self.assertIn("Created", result.stdout)
 
-    def test_init_preserves_existing_env_file(self) -> None:
+    def test_init_preserves_existing_files(self) -> None:
         target_env = self.directory / "existing.env"
         target_sites = self.directory / "existing.sites.yaml"
-        target_env.write_text("HOSTED_ZONE_ID=ZCUSTOM\n", encoding="utf-8")
+        target_env.write_text("REGION=custom-region\n", encoding="utf-8")
         target_sites.write_text(
             "defaults:\n  hosted_zone_id: ZCUSTOM\n", encoding="utf-8"
         )
@@ -262,7 +364,7 @@ class MakefileTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
-            target_env.read_text(encoding="utf-8"), "HOSTED_ZONE_ID=ZCUSTOM\n"
+            target_env.read_text(encoding="utf-8"), "REGION=custom-region\n"
         )
         self.assertEqual(
             target_sites.read_text(encoding="utf-8"),
