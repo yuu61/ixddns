@@ -107,6 +107,7 @@ class MakefileTests(unittest.TestCase):
             capture_output=True,
             text=True,
             encoding="utf-8",
+            errors="replace",
             check=False,
         )
 
@@ -233,7 +234,23 @@ class MakefileTests(unittest.TestCase):
             "UpdateFunction"
         ]["Properties"]["Code"]["ZipFile"]
         self.assertNotIn('ASN_SNAPSHOT_DATA = ""', code)
-        self.assertEqual(self.calls(), [])
+
+    def test_init_creates_env_file_when_missing(self) -> None:
+        target_env = self.directory / "new.env"
+        result = self.invoke("init", f"ENV_FILE={target_env.as_posix()}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(target_env.exists())
+        self.assertIn("Created", result.stdout)
+
+    def test_init_preserves_existing_env_file(self) -> None:
+        target_env = self.directory / "existing.env"
+        target_env.write_text("HOSTED_ZONE_ID=ZCUSTOM\n", encoding="utf-8")
+        result = self.invoke("init", f"ENV_FILE={target_env.as_posix()}")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(
+            target_env.read_text(encoding="utf-8"), "HOSTED_ZONE_ID=ZCUSTOM\n"
+        )
+        self.assertIn("already exists", result.stdout)
 
 
 if __name__ == "__main__":

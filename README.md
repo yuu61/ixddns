@@ -19,7 +19,13 @@ NEC IX → Function URL または WAF + REST API → Lambda → Route 53
 - 同じAWSアカウントのRoute 53パブリックホストゾーンと、そのゾーンへのドメイン委任。
 - IXのWAN接続・ルーティング・DNS名前解決。登録対象はインタフェースに付いたグローバルIPです。CGNAT・DS-Lite・MAP-Eなどの到達性は別途確認してください。
 
-開発用依存を導入し、設定ファイルを作成します。以下はPowerShellの例です。
+`make init`でPython仮想環境（`.venv`）の作成、依存ツールの導入、`.env`の初期作成をまとめて行えます。
+
+```sh
+make init
+```
+
+手動で準備する場合は次のように実行します（PowerShellの例）。
 
 ```powershell
 python -m venv .venv
@@ -163,6 +169,7 @@ CloudFormation定義は[cloudformation.yaml](cloudformation.yaml)と[infrastruct
 
 | コマンド | 内容 |
 | --- | --- |
+| `make init` | 仮想環境作成・開発用依存導入・`.env`作成 |
 | `make` / `make validate` | テスト・Ruff・スキーマ・安全性ルールの検証 |
 | `make test` | AWS・RIPEstatへの通信なしで単体テスト |
 | `make build` | テンプレート生成 |

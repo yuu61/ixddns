@@ -30,6 +30,8 @@ export RECORD_TYPE RECORD_TTL LOG_RETENTION_DAYS LAMBDA_RESERVED_CONCURRENCY
 export ASN_RESTRICTION_ENABLED ASN_RESTRICTION_METHOD ALLOWED_ASNS ASN_PREFIXES_FILE
 export AWS IX_WAN_IF IX_SOURCE_IF IX_NOTIFY_IF IX_CONFIG_OUTPUT
 
+SYSTEM_PYTHON ?= $(shell command -v python3 2>/dev/null || command -v python 2>/dev/null || echo python3)
+
 ifneq ($(wildcard .venv/Scripts/python.exe),)
 PYTHON ?= .venv/Scripts/python.exe
 CFN_LINT ?= .venv/Scripts/cfn-lint.exe
@@ -40,7 +42,23 @@ CFN_LINT ?= .venv/bin/cfn-lint
 CFN_GUARD ?= cfn-guard
 endif
 
-.PHONY: install-dev build validate test lint guard ruff format check-config check-asn-config check-stack-config deploy outputs token ix-config
+.PHONY: init venv install-dev build validate test lint guard ruff format check-config check-asn-config check-stack-config deploy outputs token ix-config
+
+venv:
+	@if [ ! -d .venv ]; then \
+		printf '%s\n' 'Creating virtual environment in .venv...'; \
+		"$(SYSTEM_PYTHON)" -m venv .venv || exit 1; \
+	fi
+
+init: venv
+	@$(MAKE) install-dev
+	@if [ ! -f "$(ENV_FILE)" ]; then \
+		cp .env.example "$(ENV_FILE)"; \
+		printf '%s\n' 'Created $(ENV_FILE) from .env.example.'; \
+	else \
+		printf '%s\n' '$(ENV_FILE) already exists (kept).'; \
+	fi
+	@printf '%s\n' 'Initialization complete. Edit $(ENV_FILE) and run "make validate".'
 
 install-dev:
 	"$(PYTHON)" -m pip install --requirement requirements-dev.txt
