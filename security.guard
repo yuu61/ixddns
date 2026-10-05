@@ -1,0 +1,134 @@
+# このプロジェクトの安全性ルールです。組み込み関数はJSON形式に変換して検証します。
+rule token_is_generated_and_retained {
+    Resources.SharedToken.Properties.GenerateSecretString exists
+    Resources.SharedToken.Properties.GenerateSecretString.ExcludePunctuation == true
+    Resources.SharedToken.Properties.GenerateSecretString.PasswordLength == 48
+    Resources.SharedToken.Properties.SecretString !exists
+    Resources.SharedToken.DeletionPolicy == 'Retain'
+    Resources.SharedToken.UpdateReplacePolicy == 'Retain'
+}
+
+rule no_plaintext_aws_credentials {
+    Resources.UpdateFunction.Properties.Environment.Variables {
+        AWS_ACCESS_KEY_ID !exists
+        AWS_SECRET_ACCESS_KEY !exists
+        AWS_SESSION_TOKEN !exists
+        SHARED_TOKEN !exists
+        TOKEN_SECRET_ARN.Ref == 'SharedToken'
+    }
+}
+
+rule route53_permission_is_scoped {
+    let update_statements = Resources.FunctionRole.Properties.Policies[*].PolicyDocument.Statement[ Sid == 'UpdateOneRecord' ]
+    %update_statements !empty
+    %update_statements {
+        Action == 'route53:ChangeResourceRecordSets'
+        Resource.'Fn::Sub' == 'arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}'
+        Condition.'ForAllValues:StringEquals' {
+            'route53:ChangeResourceRecordSetsNormalizedRecordNames'[0].Ref == 'RecordName'
+            'route53:ChangeResourceRecordSetsRecordTypes'[0].Ref == 'RecordType'
+            'route53:ChangeResourceRecordSetsActions' == ['UPSERT']
+        }
+    }
+}
+
+rule secret_read_is_scoped {
+    let secret_statements = Resources.FunctionRole.Properties.Policies[*].PolicyDocument.Statement[ Sid == 'ReadSharedToken' ]
+    %secret_statements !empty
+    %secret_statements {
+        Action == 'secretsmanager:GetSecretValue'
+        Resource.Ref == 'SharedToken'
+    }
+}
+
+rule invocation_is_scoped {
+    Resources.InvokePermission.Properties {
+        Principal == 'apigateway.amazonaws.com'
+        SourceAccount.Ref == 'AWS::AccountId'
+        SourceArn.'Fn::Sub' == 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/GET/update'
+    }
+    Resources.InvokePermission.Condition == 'UseHttpApi'
+    Resources.RestInvokePermission.Condition == 'UseWaf'
+    Resources.RestInvokePermission.Properties {
+        Principal == 'apigateway.amazonaws.com'
+        SourceAccount.Ref == 'AWS::AccountId'
+        SourceArn.'Fn::Sub' == 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/ddns/GET/update'
+    }
+}
+
+rule logs_omit_authentication_values {
+    Resources.UpdateFunction.Properties.LoggingConfig.LogFormat == 'JSON'
+    Resources.FunctionLogGroup.Properties.RetentionInDays exists
+    Resources.ApiAccessLogGroup.Properties.RetentionInDays exists
+    Resources.ApiStage.Properties.AccessLogSettings.Format !in [ /(?i).*token.*/, /(?i).*querystring.*/, /(?i).*authorization.*/ ]
+}
+
+rule api_exposes_only_the_ddns_route {
+    Resources.HttpApi.Condition == 'UseHttpApi'
+    Resources.HttpApi.Properties.ProtocolType == 'HTTP'
+    Resources.UpdateRoute.Properties.RouteKey == 'GET /update'
+    Resources.LambdaIntegration.Properties.PayloadFormatVersion == '2.0'
+    Resources.ApiStage.Properties.DefaultRouteSettings.ThrottlingRateLimit <= 1
+    Resources.ApiStage.Properties.DefaultRouteSettings.ThrottlingBurstLimit <= 2
+    Resources.RestApi.Condition == 'UseWaf'
+    Resources.RestUpdateMethod.Properties.HttpMethod == 'GET'
+    Resources.RestUpdateMethod.Properties.Integration.Type == 'AWS_PROXY'
+    Resources.RestUpdateResource.Properties.PathPart == 'update'
+    Resources.RestStage.Properties.MethodSettings[*] {
+        ThrottlingRateLimit <= 1
+        ThrottlingBurstLimit <= 2
+        DataTraceEnabled == false
+    }
+}
+
+rule asn_restriction_is_enforced_at_the_api {
+    Conditions.UseAsnRestriction.'Fn::Equals' == [ { 'Ref': 'AsnRestrictionEnabled' }, 'true' ]
+    Conditions.UseHttpApi.'Fn::Not' == [ { 'Condition': 'UseWaf' } ]
+    Conditions.UseWaf.'Fn::And' == [ { 'Condition': 'UseAsnRestriction' }, { 'Fn::Equals': [ { 'Ref': 'AsnRestrictionMethod' }, 'waf' ] } ]
+    Parameters.AsnRestrictionMethod.AllowedValues == ['static', 'waf']
+    Resources.UpdateFunction.Properties.Environment.Variables {
+        ASN_RESTRICTION_ENABLED.Ref == 'AsnRestrictionEnabled'
+        ASN_RESTRICTION_METHOD.Ref == 'AsnRestrictionMethod'
+        ALLOWED_ASNS.'Fn::Join' == [ ',', { 'Ref': 'AllowedAsns' } ]
+    }
+    Resources.DdnsWebAcl.Condition == 'UseWaf'
+    Resources.DdnsWebAcl.Properties {
+        Scope == 'REGIONAL'
+        DefaultAction.Block exists
+        VisibilityConfig.SampledRequestsEnabled == false
+        Rules[*].VisibilityConfig.SampledRequestsEnabled == false
+        Rules[*].Name in [ 'source-ip-rate', 'allowed-asns' ]
+    }
+    let asn_rules = Resources.DdnsWebAcl.Properties.Rules[ Name == 'allowed-asns' ]
+    %asn_rules !empty
+    %asn_rules {
+        Priority == 1
+        Action.Allow exists
+        Statement.AsnMatchStatement.AsnList.Ref == 'AllowedAsns'
+        Statement.AsnMatchStatement.ForwardedIPConfig !exists
+    }
+    let rate_rules = Resources.DdnsWebAcl.Properties.Rules[ Name == 'source-ip-rate' ]
+    %rate_rules !empty
+    %rate_rules {
+        Priority == 0
+        Action.Block exists
+        Statement.RateBasedStatement.AggregateKeyType == 'IP'
+        Statement.RateBasedStatement.Limit <= 60
+        Statement.RateBasedStatement.EvaluationWindowSec == 60
+    }
+    Resources.WafAssociation.Condition == 'UseWaf'
+    Resources.WafAssociation.Properties {
+        WebACLArn.'Fn::GetAtt' == [ 'DdnsWebAcl', 'Arn' ]
+        ResourceArn.'Fn::Sub' == 'arn:${AWS::Partition}:apigateway:${AWS::Region}::/restapis/${RestApi}/stages/${RestStage}'
+    }
+}
+
+rule waf_logs_omit_authentication_values {
+    Resources.WafLogging.Condition == 'UseWaf'
+    Resources.WafLogging.Properties.ResourceArn.'Fn::GetAtt' == [ 'DdnsWebAcl', 'Arn' ]
+    Resources.WafLogging.Properties.LogDestinationConfigs[0].'Fn::Sub' == 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${WafLogGroup}'
+    let redacted_query = Resources.WafLogging.Properties.RedactedFields[ QueryString exists ]
+    %redacted_query !empty
+    Resources.WafLogGroup.Properties.RetentionInDays exists
+    Resources.WafLogGroup.DeletionPolicy == 'Retain'
+}

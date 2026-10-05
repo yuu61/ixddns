@@ -1,0 +1,89 @@
+Resources:
+  RestApi:
+    Condition: UseWaf
+    Type: AWS::ApiGateway::RestApi
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: ASN制限をAPI到達時に適用するため、WAFを直接関連付けられるREST APIを使う。
+        must:
+          - 有効時はHTTP APIを作成せず、WAFを迂回できる別の更新窓口を残さない。
+    Properties:
+      Name: !Sub "${AWS::StackName}-ddns-asn"
+      EndpointConfiguration:
+        Types: [REGIONAL]
+      DisableExecuteApiEndpoint: false
+
+  RestUpdateResource:
+    Condition: UseWaf
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: update
+
+  RestUpdateMethod:
+    Condition: UseWaf
+    Type: AWS::ApiGateway::Method
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: IXのGET通知をLambdaへ渡し、共通のトークン認証とレコード更新処理を利用する。
+        must:
+          - 重複クエリを検査できるLambdaプロキシ統合を使う。
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref RestUpdateResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UpdateFunction.Arn}/invocations"
+        TimeoutInMillis: 29000
+
+  RestInvokePermission:
+    Condition: UseWaf
+    Type: AWS::Lambda::Permission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: このスタックのREST APIの更新ルートからだけLambdaを呼び出せるようにする。
+        must:
+          - 呼び出し元のアカウントとARNの両方を制限する。
+    Properties:
+      FunctionName: !Ref UpdateFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/ddns/GET/update"
+
+  RestDeployment:
+    Condition: UseWaf
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: RestUpdateMethod
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: REST APIの定義を配置する。ビルド時にAPI定義のハッシュをIDへ付け、変更時も再配置する。
+        must:
+          - 更新メソッドの作成後に配置する。
+    Properties:
+      RestApiId: !Ref RestApi
+
+  RestStage:
+    Condition: UseWaf
+    Type: AWS::ApiGateway::Stage
+    DependsOn: RestInvokePermission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 1台分の通常の通知に合わせて流量を制限し、遮断はWAFログ、更新はLambdaログで確認する。
+        must:
+          - 共有トークンを含むため、リクエスト本文やクエリの実行ログを有効にしない。
+          - このステージにWAFを関連付ける。
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref RestDeployment
+      StageName: ddns
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 2
+          ThrottlingRateLimit: 1
+          DataTraceEnabled: false

@@ -1,0 +1,200 @@
+# 共通定義です。make buildでinfrastructure/*.yamlとLambdaコードを結合します。
+# このファイル単体ではデプロイせず、生成した.build/template.jsonを使ってください。
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  NEC IXのDDNSクライアントから認証付きHTTPS GETを受け取り、Route 53を更新します。
+  IX側のGET通知を、署名が必要なRoute 53の更新APIへ中継します。
+
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: IXのDDNS -> HTTP API（制限なし・static）またはWAF付きREST API -> Lambda -> 既存のRoute 53ホストゾーン
+    must:
+      - 1スタックにつき単純なDNSレコード1つを更新し、リクエストからDNS名を受け取らない。
+      - リクエストのクエリや共有トークンをログに記録しない。
+    ref:
+      - at: README.md
+        has: デプロイ手順、IXの設定、リソースの所有と削除時の扱い
+
+Conditions:
+  UseAsnRestriction: !Equals [!Ref AsnRestrictionEnabled, "true"]
+  UseWaf: !And [!Condition UseAsnRestriction, !Equals [!Ref AsnRestrictionMethod, "waf"]]
+  UseHttpApi: !Not [!Condition UseWaf]
+
+Parameters:
+  AsnRestrictionEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: trueで選択した方式による送信元制限を有効にします。
+  AsnRestrictionMethod:
+    Type: String
+    Default: static
+    AllowedValues: [static, waf]
+    Description: staticはデプロイ時のCIDR一覧をLambdaで照合、wafはAWS WAFのASN判定を使います。
+  HostedZoneId:
+    Type: String
+    Description: このAWSアカウントにある既存のパブリックホストゾーンID。/hostedzone/は付けません。
+    AllowedPattern: "^Z[A-Z0-9]+$"
+    MaxLength: 32
+    ConstraintDescription: Z0123456789EXAMPLEのようなホストゾーンIDを指定してください。
+  RecordName:
+    Type: String
+    Description: 更新するDNS名を完全修飾名で指定します。小文字で、末尾のドットは付けません。
+    AllowedPattern: '^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    MaxLength: 253
+    ConstraintDescription: router.example.comのような小文字のDNS名を、末尾のドットなしで指定してください。
+  RecordType:
+    Type: String
+    Default: A
+    AllowedValues: [A, AAAA]
+    Description: グローバルIPv4はA、グローバルIPv6はAAAAを指定します。種別ごとに別のスタックを作成してください。
+  RecordTTL:
+    Type: Number
+    Default: 60
+    MinValue: 30
+    MaxValue: 86400
+    Description: DNSレコードのTTLを秒で指定します。
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365]
+    Description: APIアクセスログとLambdaアプリケーションログの保存期間を日数で指定します。
+
+Resources:
+  SharedToken:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 平文の入力パラメータを使わず、IXで利用できる共有トークンを生成する。
+        must:
+          - スタックの削除やリソースの置換時もトークンを保持する。
+          - トークンは英数字のみとし、IXのパスワード長の上限に収める。
+    Properties:
+      Description: !Sub "${AWS::StackName}のIX DDNS用共有トークン"
+      GenerateSecretString:
+        SecretStringTemplate: "{}"
+        GenerateStringKey: token
+        PasswordLength: 48
+        ExcludePunctuation: true
+        IncludeSpace: false
+
+  FunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 認証情報やイベント全体を記録せず、更新の失敗を確認できるようにする。
+        must:
+          - トークンの値やクエリ文字列をログに記録しない。
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+
+  ApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: HTTP APIの通知失敗を調べるログを保存し、API方式の切り替え時も同じグループを維持する。
+        must:
+          - アクセスログの形式にクエリ文字列や認証情報を含めない。
+    Properties:
+      RetentionInDays: !Ref LogRetentionDays
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Lambdaの一時的な認証情報でAWS APIを呼び出し、IXへのAWSキーの設定を不要にする。
+        must:
+          - 指定したホストゾーン内の、指定した名前と種別のレコードに対するUPSERTだけを許可する。
+          - シークレットの読み取りとログの書き込みは、このスタックのリソースに限定する。
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ddns-update
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: UpdateOneRecord
+                Effect: Allow
+                Action: route53:ChangeResourceRecordSets
+                Resource: !Sub "arn:${AWS::Partition}:route53:::hostedzone/${HostedZoneId}"
+                Condition:
+                  ForAllValues:StringEquals:
+                    route53:ChangeResourceRecordSetsNormalizedRecordNames:
+                      - !Ref RecordName
+                    route53:ChangeResourceRecordSetsRecordTypes:
+                      - !Ref RecordType
+                    route53:ChangeResourceRecordSetsActions:
+                      - UPSERT
+              - Sid: ReadSharedToken
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref SharedToken
+              - Sid: WriteApplicationLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt FunctionLogGroup.Arn
+
+  UpdateFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: ランタイム付属のSDKで、IXからのGET通知を署名付きのRoute 53 APIへ中継する。
+        must:
+          - DNSを変更する前に認証する。
+          - static方式はビルド時のASN起点CIDRを埋め込み、APIが渡す送信元IPを照合する。
+          - static一覧の未埋め込み・設定ASNとの不一致はDNSを変更せず拒否する。
+          - 指定したレコード種別に一致する、グローバルに到達可能なIPアドレスだけを受け付ける。
+          - AWS処理の失敗は認証情報を公開せずにHTTP 503で通知する。
+    Properties:
+      Runtime: python3.14
+      Handler: index.handler
+      Architectures: [arm64]
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt FunctionRole.Arn
+      LoggingConfig:
+        LogGroup: !Ref FunctionLogGroup
+        LogFormat: JSON
+      Environment:
+        Variables:
+          HOSTED_ZONE_ID: !Ref HostedZoneId
+          RECORD_NAME: !Ref RecordName
+          RECORD_TYPE: !Ref RecordType
+          RECORD_TTL: !Ref RecordTTL
+          TOKEN_SECRET_ARN: !Ref SharedToken
+          ASN_RESTRICTION_ENABLED: !Ref AsnRestrictionEnabled
+          ASN_RESTRICTION_METHOD: !Ref AsnRestrictionMethod
+          ALLOWED_ASNS: !Join [",", !Ref AllowedAsns]
+      # make buildがlambda/index.pyをZipFileへ埋め込みます。
+      Code:
+        ZipFile: ""
+
+Outputs:
+  AsnRestrictionMethod:
+    Description: 送信元制限の方式です。制限無効時は使用しません。
+    Value: !Ref AsnRestrictionMethod
+  TokenSecretArn:
+    Description: 権限のある利用者が、このシークレットのJSON内のtokenフィールドを取得してください。
+    Value: !Ref SharedToken
+  LambdaLogGroup:
+    Description: 更新の受理と失敗を確認するアプリケーションログの保存先です。
+    Value: !Ref FunctionLogGroup
+  AsnRestrictionEnabled:
+    Description: 送信元ASN制限が有効かを示します。
+    Value: !Ref AsnRestrictionEnabled

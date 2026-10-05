@@ -1,0 +1,86 @@
+Resources:
+  HttpApi:
+    Condition: UseHttpApi
+    Type: AWS::ApiGatewayV2::Api
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: IXでSigV4署名を生成せずに利用できる、管理されたHTTPS窓口を提供する。
+        must:
+          - Route 53 APIの呼び出し前にLambdaで認証する。
+    Properties:
+      Name: !Sub "${AWS::StackName}-ddns"
+      ProtocolType: HTTP
+      DisableExecuteApiEndpoint: false
+
+  LambdaIntegration:
+    Condition: UseHttpApi
+    Type: AWS::ApiGatewayV2::Integration
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 追加の変換設定や認証関数を使わず、クエリパラメータをLambdaへ渡す。
+        must:
+          - rawQueryStringを解析するため、HTTP APIのペイロード形式は2.0を維持する。
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      IntegrationUri: !GetAtt UpdateFunction.Arn
+      PayloadFormatVersion: "2.0"
+      TimeoutInMillis: 30000
+
+  UpdateRoute:
+    Condition: UseHttpApi
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: GET /update
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${LambdaIntegration}"
+
+  InvokePermission:
+    Condition: UseHttpApi
+    Type: AWS::Lambda::Permission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: このAWSアカウントのDDNS APIルートからだけLambdaを呼び出せるようにする。
+        must:
+          - 呼び出し元のアカウントとARNの両方を制限する。
+    Properties:
+      FunctionName: !Ref UpdateFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/GET/update"
+
+  ApiStage:
+    Condition: UseHttpApi
+    Type: AWS::ApiGatewayV2::Stage
+    DependsOn: InvokePermission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: ルータ向けの窓口を自動デプロイし、1台分の通常の通知に合わせてリクエスト数を制限する。
+        must:
+          - 共有トークンを含むため、クエリ文字列をログに記録しない。
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 2
+        ThrottlingRateLimit: 1
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiAccessLogGroup.Arn
+        Format: >-
+          {"requestId":"$context.requestId","routeKey":"$context.routeKey","status":"$context.status","integrationLatency":"$context.integrationLatency"}
+
+Outputs:
+  UpdateUrl:
+    Description: IXのDDNSプロファイルに設定するHTTPS URLです。クエリは別途設定してください。
+    Value: !If
+      - UseWaf
+      - !Sub "https://${RestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/ddns/update"
+      - !Sub "${HttpApi.ApiEndpoint}/update"
+  ApiLogGroup:
+    Condition: UseHttpApi
+    Description: HTTP APIのアクセスログです。クエリ文字列は記録しません。
+    Value: !Ref ApiAccessLogGroup

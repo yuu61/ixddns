@@ -1,0 +1,110 @@
+Parameters:
+  AllowedAsns:
+    Type: CommaDelimitedList
+    Default: "0"
+    AllowedPattern: "^(0|[1-9][0-9]{0,9})$"
+    Description: 許可する送信元ASNを数値で指定します。無効時は0、有効時は実回線のASNを指定してください。
+
+Rules:
+  RequireAllowedAsns:
+    RuleCondition: !Equals [!Ref AsnRestrictionEnabled, "true"]
+    Assertions:
+      - Assert: !Not [!Contains [!Ref AllowedAsns, "0"]]
+        AssertDescription: ASN制限を有効にする場合は、0以外の許可ASNを指定してください。
+
+Resources:
+  WafLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: ASN制限の切り替え後も同じロググループを再利用し、保持した名前との衝突を避ける。
+        must:
+          - WAFログの保存先はaws-waf-logs-で始める。
+          - スタック削除時もログを保持する。
+    Properties:
+      LogGroupName: !Sub "aws-waf-logs-${AWS::StackName}"
+      RetentionInDays: !Ref LogRetentionDays
+
+  DdnsWebAcl:
+    Condition: UseWaf
+    Type: AWS::WAFv2::WebACL
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: IPアドレス変更後も送信回線のASNで許可し、許可外のアクセスはLambdaへ渡す前に遮断する。
+        must:
+          - 既定動作は拒否とし、許可したASNだけを通す。
+          - クライアントが指定する転送ヘッダーではなく、通信の送信元IPを使う。
+          - トークンを含むリクエストのサンプリングを無効にする。
+    Properties:
+      Scope: REGIONAL
+      DefaultAction:
+        Block: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: ddns_acl
+        SampledRequestsEnabled: false
+      Rules:
+        - Name: source-ip-rate
+          Priority: 0
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 60
+              EvaluationWindowSec: 60
+              AggregateKeyType: IP
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: source_ip_rate
+            SampledRequestsEnabled: false
+        - Name: allowed-asns
+          Priority: 1
+          Action:
+            Allow: {}
+          Statement:
+            AsnMatchStatement:
+              AsnList: !Ref AllowedAsns
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: allowed_asns
+            SampledRequestsEnabled: false
+
+  WafAssociation:
+    Condition: UseWaf
+    Type: AWS::WAFv2::WebACLAssociation
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 実際のREST APIステージにACLを関連付け、更新処理へ進む前にASNを検査する。
+        must:
+          - 同じリージョンの、このスタックのREST APIステージを保護する。
+    Properties:
+      WebACLArn: !GetAtt DdnsWebAcl.Arn
+      ResourceArn: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/restapis/${RestApi}/stages/${RestStage}"
+
+  WafLogging:
+    Condition: UseWaf
+    Type: AWS::WAFv2::LoggingConfiguration
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: 拒否した通信を調べられるようにし、クエリ内の共有トークンをログへ残さない。
+        must:
+          - クエリ全体と認証用ヘッダーをログから除外する。
+    Properties:
+      ResourceArn: !GetAtt DdnsWebAcl.Arn
+      LogDestinationConfigs:
+        # LogGroup.Arnには末尾の:*が付くため、WAFが受け付けるロググループARNを組み立てます。
+        - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${WafLogGroup}"
+      RedactedFields:
+        - QueryString: {}
+        - SingleHeader:
+            Name: authorization
+        - SingleHeader:
+            Name: cookie
+
+Outputs:
+  WafLogGroup:
+    Condition: UseWaf
+    Description: ASN制限と流量制限の判定を確認するWAFログの保存先です。クエリは除外しています。
+    Value: !Ref WafLogGroup
