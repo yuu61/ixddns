@@ -8,21 +8,22 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from scripts import generate_ix_config as generator
 
 
 class IxConfigTests(unittest.TestCase):
-    def setUp(self):
+    """実機へ投入する設定の置換・取得・失敗時の保持を検証する。"""
+
+    def setUp(self) -> None:
         build = generator.PROJECT / ".build"
         build.mkdir(exist_ok=True)
         temporary = tempfile.TemporaryDirectory(prefix="ix-config-test-", dir=build)
         self.directory = Path(temporary.name).resolve()
         if not self.directory.is_relative_to(build.resolve()):
-            raise RuntimeError(
-                "テスト用ディレクトリがプロジェクトの.build外にあります。"
-            )
+            message = "テスト用ディレクトリがプロジェクトの.build外にあります。"
+            raise RuntimeError(message)
         self.addCleanup(temporary.cleanup)
         self.output = self.directory / "generated" / "router.cfg"
         self.token = "Ab0123456789" * 4
@@ -65,13 +66,15 @@ class IxConfigTests(unittest.TestCase):
         }
         self.secret = {"SecretString": json.dumps({"token": self.token})}
 
-    def aws_result(self, command, **kwargs):
+    def aws_result(
+        self, command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         response = self.stack if "describe-stacks" in command else self.secret
         return subprocess.CompletedProcess(
             command, 0, stdout=json.dumps(response), stderr=""
         )
 
-    def invoke(self, side_effect=None):
+    def invoke(self, side_effect: object = None) -> tuple[int, str, str, MagicMock]:
         stdout, stderr = io.StringIO(), io.StringIO()
         with (
             patch.dict(os.environ, self.environment, clear=True),
@@ -85,7 +88,7 @@ class IxConfigTests(unittest.TestCase):
         self.assertNotIn(self.token, stdout.getvalue() + stderr.getvalue())
         return code, stdout.getvalue(), stderr.getvalue(), run
 
-    def test_generates_ipv4_and_ipv6_without_replacing_ix_macros(self):
+    def test_generates_ipv4_and_ipv6_without_replacing_ix_macros(self) -> None:
         for record_type, macro, family in (
             ("A", "<IP4>", "ipv4"),
             ("AAAA", "<IP6>", "ipv6"),
@@ -117,7 +120,7 @@ class IxConfigTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 2)
                 self.assertNotIn(self.token, str(run.call_args_list))
 
-    def test_aws_uses_selected_stack_profile_and_secret_without_a_shell(self):
+    def test_aws_uses_selected_stack_profile_and_secret_without_a_shell(self) -> None:
         code, _, stderr, run = self.invoke()
         self.assertEqual(code, 0, stderr)
         stack_command = run.call_args_list[0].args[0]
@@ -137,7 +140,7 @@ class IxConfigTests(unittest.TestCase):
         )
         self.assertNotIn("shell", run.call_args.kwargs)
 
-    def test_blank_profile_uses_default_credentials(self):
+    def test_blank_profile_uses_default_credentials(self) -> None:
         self.environment["AWS_PROFILE"] = ""
         code, _, stderr, run = self.invoke()
         self.assertEqual(code, 0, stderr)
@@ -145,7 +148,7 @@ class IxConfigTests(unittest.TestCase):
             self.assertNotIn("--profile", call.args[0])
             self.assertNotIn("AWS_PROFILE", call.kwargs["env"])
 
-    def test_missing_or_unsafe_interfaces_stop_before_reading_aws(self):
+    def test_missing_or_unsafe_interfaces_stop_before_reading_aws(self) -> None:
         for name, value, record_type in (
             ("IX_WAN_IF", "", "A"),
             ("IX_SOURCE_IF", "", "AAAA"),
@@ -166,7 +169,7 @@ class IxConfigTests(unittest.TestCase):
                 run.assert_not_called()
                 self.assertFalse(self.output.exists())
 
-    def test_stack_mismatch_stops_before_reading_the_secret(self):
+    def test_stack_mismatch_stops_before_reading_the_secret(self) -> None:
         for name, value in (
             ("RECORD_TYPE", "AAAA"),
             ("RECORD_NAME", "other.example.com"),
@@ -182,7 +185,7 @@ class IxConfigTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 1)
                 self.assertFalse(self.output.exists())
 
-    def test_missing_outputs_stop_before_reading_the_secret(self):
+    def test_missing_outputs_stop_before_reading_the_secret(self) -> None:
         self.stack["Stacks"][0]["Outputs"] = []
         code, _, stderr, run = self.invoke()
         self.assertEqual(code, 1)
@@ -190,7 +193,7 @@ class IxConfigTests(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertFalse(self.output.exists())
 
-    def test_invalid_url_or_secret_cannot_inject_ix_commands(self):
+    def test_invalid_url_or_secret_cannot_inject_ix_commands(self) -> None:
         for url, secret in (
             ("http://example.com/update", self.secret),
             (self.url + "\nwrite memory", self.secret),
@@ -208,7 +211,7 @@ class IxConfigTests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertFalse(self.output.exists())
 
-    def test_aws_failure_does_not_expose_output_or_replace_existing_file(self):
+    def test_aws_failure_does_not_expose_output_or_replace_existing_file(self) -> None:
         self.output.parent.mkdir()
         self.output.write_text("既存コンフィグ\n", encoding="utf-8")
         for result in (
@@ -225,11 +228,11 @@ class IxConfigTests(unittest.TestCase):
                     self.output.read_text(encoding="utf-8"), "既存コンフィグ\n"
                 )
 
-    def test_unknown_template_placeholder_is_rejected(self):
+    def test_unknown_template_placeholder_is_rejected(self) -> None:
         with self.assertRaises(generator.ConfigError):
             generator.render_config("url <UNSUPPORTED>\n", {})
 
-    def test_output_defaults_follow_record_type(self):
+    def test_output_defaults_follow_record_type(self) -> None:
         for record_type, family in (("A", "ipv4"), ("AAAA", "ipv6")):
             with self.subTest(record_type=record_type):
                 environment = {
@@ -244,7 +247,7 @@ class IxConfigTests(unittest.TestCase):
                     generator.PROJECT / "examples" / f"ix3315-ddns-{family}.cfg",
                 )
 
-    def test_asn_mode_and_allow_list_must_match_the_deployed_stack(self):
+    def test_asn_mode_and_allow_list_must_match_the_deployed_stack(self) -> None:
         self.environment.update(
             ASN_RESTRICTION_ENABLED="true",
             ASN_RESTRICTION_METHOD="waf",
@@ -254,12 +257,10 @@ class IxConfigTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("AsnRestrictionEnabled", stderr)
         self.assertEqual(run.call_count, 1)
-        self.stack["Stacks"][0]["Parameters"].extend(
-            [
-                {"ParameterKey": "AsnRestrictionEnabled", "ParameterValue": "true"},
-                {"ParameterKey": "AllowedAsns", "ParameterValue": "64496"},
-            ]
-        )
+        self.stack["Stacks"][0]["Parameters"].extend([
+            {"ParameterKey": "AsnRestrictionEnabled", "ParameterValue": "true"},
+            {"ParameterKey": "AllowedAsns", "ParameterValue": "64496"},
+        ])
         code, _, stderr, run = self.invoke()
         self.assertEqual(code, 1)
         self.assertIn("AllowedAsns", stderr)
@@ -272,27 +273,26 @@ class IxConfigTests(unittest.TestCase):
         self.assertEqual(code, 0, stderr)
         self.assertIn("/ddns/update", self.output.read_text(encoding="utf-8"))
 
-    def test_static_method_must_match_the_stack_before_reading_secret(self):
+    def test_static_method_must_match_the_stack_before_reading_secret(self) -> None:
         self.environment.update(
             ASN_RESTRICTION_ENABLED="true",
             ASN_RESTRICTION_METHOD="static",
             ALLOWED_ASNS="3333",
         )
         parameters = self.stack["Stacks"][0]["Parameters"]
-        parameters.extend(
-            [
-                {"ParameterKey": "AsnRestrictionEnabled", "ParameterValue": "true"},
-                {"ParameterKey": "AllowedAsns", "ParameterValue": "3333"},
-            ]
-        )
+        parameters.extend([
+            {"ParameterKey": "AsnRestrictionEnabled", "ParameterValue": "true"},
+            {"ParameterKey": "AllowedAsns", "ParameterValue": "3333"},
+        ])
         # 方式パラメータがない旧スタックをstaticと誤認しません。
         code, _, stderr, run = self.invoke()
         self.assertEqual(code, 1)
         self.assertIn("AsnRestrictionMethod", stderr)
         self.assertEqual(run.call_count, 1)
-        parameters.append(
-            {"ParameterKey": "AsnRestrictionMethod", "ParameterValue": "static"}
-        )
+        parameters.append({
+            "ParameterKey": "AsnRestrictionMethod",
+            "ParameterValue": "static",
+        })
         code, _, stderr, run = self.invoke()
         self.assertEqual(code, 0, stderr)
         self.assertEqual(run.call_count, 2)

@@ -275,11 +275,17 @@ make test
 
 CloudFormationのスキーマ検証は`cfn-lint`で行います。AWSアカウントにおける権限・ホストゾーンの所有・サービスクォータ・実機のHTTPS互換性はローカルテストでは確認できません。デプロイ後にログと実際のレコードを確認してください。
 
-このプロジェクトの検証環境は`.venv`内の`cfn-lint 1.57.1`と、`.tools`内の`cfn-guard 3.2.1`です。GNU Makeと`sh`が使える環境で、[makefile](makefile)からまとめて検証します。WindowsではMSYS2のGNU Makeと`sh`を使用できます。
+このプロジェクトの検証環境はPython 3.14で、`.venv`内の`Ruff 0.16.6`・`cfn-lint 1.57.1`と、`.tools`内の`cfn-guard 3.2.1`を使います。Pythonの開発用依存は[requirements-dev.txt](requirements-dev.txt)でバージョンを固定しています。GNU Makeと`sh`が使える環境で、[makefile](makefile)からまとめて検証します。WindowsではMSYS2のGNU Makeと`sh`を使用できます。
+
+新しく環境を作る場合は、Python 3.14で次のように導入します。既存の`.venv`には`make install-dev`でも導入できます。cfn-guardはPythonパッケージに含まれないため、別途用意してください。
 
 ```powershell
+python -m venv .venv
+.venv/Scripts/python.exe -m pip install -r requirements-dev.txt
 make validate
 ```
+
+Linux/macOSでは`.venv/bin/python`を使います。
 
 引数なしの`make`も同じ検証を実行します。static制限を有効にした環境の`make build`・`make lint`・`make guard`・`make validate`は、実際のデプロイと同じ一覧を検証するためRIPEstatにアクセスします。`make test`は外部通信しません。
 
@@ -287,14 +293,50 @@ make validate
 | --- | --- |
 | `make build` | 分割定義とLambdaコードからテンプレートを生成 |
 | `make test` | Lambda・Makefile・IXコンフィグ生成・ASN設定・結合テンプレートのテスト |
-| `make lint` | CloudFormationのスキーマ検証 |
+| `make install-dev` | 既存の仮想環境へ開発用依存を導入 |
+| `make ruff` | Pythonの全ルール検査とフォーマット検査 |
+| `make format` | Ruffの修正可能な指摘を修正し、Pythonを整形 |
+| `make lint` | Ruff検査後、CloudFormationのスキーマ検証 |
 | `make guard` | スキーマ検証後、プロジェクトの安全性ルールを検証 |
-| `make validate` | 上記すべてを実行 |
+| `make validate` | 設定確認・テスト・Ruff・スキーマ・安全性の検証 |
 | `make ix-config` | デプロイ済みスタックからIX投入用コンフィグを生成 |
 
 リージョンは`make validate REGION=ap-northeast-1`で指定できます。別のツール環境を使う場合は、`PYTHON`、`CFN_LINT`、`CFN_GUARD`を指定して実行してください。
 
 `security.guard`は、このDDNS構成について生成トークン、IAMの対象制限、呼び出し元の制限、ログ、APIルート、ASN制限とWAFの関連付けを検査するプロジェクト独自のルールです。AWS全体のコンプライアンス認定を行うものではありません。
+
+## Ruffのルール方針
+
+[ruff.toml](ruff.toml)で`select = ["ALL"]`と`preview = true`を指定し、プレビューを含む全ルールを有効にしています。Ruffのバージョンも固定し、環境によって検査結果が変わることを防ぎます。設定のルール名はRuff 0.16.6の正式名で記載しています。
+
+行単位の`noqa`・`nolint`・`ruff: ignore`は使いません。`make ruff`は`--ignore-noqa`も指定するため、後から行単位の抑制を加えても検査を通過させません。型注釈・説明文・処理分割・例外の組み立てはコードで対応します。Lambdaコードを読み込むテストは、`exec`の直接使用をやめ、Pythonのモジュールローダーを使います。
+
+コードの性質に合わない以下のルールだけ、設定ファイルで無効化しています。ファイルを限定できるものは対象を限定し、設定内にも理由を記載しています。
+
+| ルール | 対象 | 理由 |
+| --- | --- | --- |
+| `D203`・`D213` | 全体 | 同時に有効化できない説明文の配置規則。`D211`・`D212`の形式に統一 |
+| `D400`・`D415` | 全体 | 日本語の句点「。」で説明を書くため、英文の句読点を要求しない |
+| `CPY001` | 全体 | 著作権者・ライセンスが未指定。著作権表示を推測して追加しない |
+| `COM812` | 全体 | カンマ配置はRuff formatterで統一 |
+| `PT009`・`PT027` | テスト | 標準ライブラリのunittestを採用しており、pytestへの書き換えを要求しない |
+| `D102` | テスト | unittestのテスト名・assertionが仕様を示すため、各メソッドに説明を重ねない |
+| `S106`・`S107` | Lambdaのテスト2ファイル | 認証の試験に必要なダミートークンで、実際の共有トークンではない |
+| `S104` | 通知のテスト | `0.0.0.0`の拒否試験であり、全インタフェースの待受設定ではない |
+| `S311` | ASN一覧のテスト | 再現可能な圧縮容量試験のデータ生成。暗号用途ではない |
+| `S404`・`S603` | IX生成ツール・Makefileのテスト | 利用者が指定したCLIを引数配列で実行する機能・試験。shellは使用しない |
+| `S404` | IX生成のテスト | 模擬応答の`CompletedProcess`型だけを使い、プロセスはモックする |
+| `S310` | ASN取得ツール | 接続先は固定のHTTPS API。利用者からURLを受け取らない |
+| `T201` | CLIツール3ファイル | 生成結果とエラーを標準出力・標準エラーへ表示するため |
+| `INP001` | Lambda | CloudFormationのインラインコードは単一のindex.pyで、パッケージではない |
+| `TRY400` | Lambda | SDK例外の本文に秘密情報が含まれ得るため、例外全文やトレースバックを記録しない |
+
+```sh
+make ruff
+make format
+```
+
+`make validate`・`make lint`・`make guard`・`make deploy`でもRuff検査を実行します。
 
 ## スタック削除時の扱い
 
@@ -311,3 +353,5 @@ API、Lambda、IAMロールは削除されます。ホストゾーンと、Lambd
 - [AWS: Route 53のレコード単位のIAM条件](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html)
 - [AWS: HTTP APIのLambda連携](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html)
 - [AWS: Lambdaランタイム](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html)
+- [Ruff: 設定方法](https://docs.astral.sh/ruff/configuration/)
+- [Ruff: ルール一覧](https://docs.astral.sh/ruff/rules/)

@@ -10,13 +10,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_asn_prefixes import snapshot
+
 PROJECT = Path(__file__).resolve().parents[1]
 MAKE = shutil.which("make")
 
 
 @unittest.skipUnless(MAKE and shutil.which("sh"), "GNU Make and sh are required")
 class MakefileTests(unittest.TestCase):
-    def setUp(self):
+    """設定ファイルとMakeからAWS CLIへ渡す引数を検証する。"""
+
+    def setUp(self) -> None:
         build_directory = PROJECT / ".build"
         build_directory.mkdir(exist_ok=True)
         temporary = tempfile.TemporaryDirectory(
@@ -24,9 +28,8 @@ class MakefileTests(unittest.TestCase):
         )
         self.directory = Path(temporary.name).resolve()
         if not self.directory.is_relative_to(build_directory.resolve()):
-            raise RuntimeError(
-                "Test directory is outside the project's build directory"
-            )
+            message = "Test directory is outside the project's build directory"
+            raise RuntimeError(message)
         self.addCleanup(temporary.cleanup)
         self.config = self.directory / "config.env"
         self.log = self.directory / "aws-calls.jsonl"
@@ -50,10 +53,12 @@ class MakefileTests(unittest.TestCase):
             "from pathlib import Path\n"
             "args = sys.argv[1:]\n"
             f"with Path({str(self.log)!r}).open('a', encoding='utf-8') as stream:\n"
-            "    stream.write(json.dumps({'args': args, 'profile': os.environ.get('AWS_PROFILE')}) + '\\n')\n"
+            "    stream.write(json.dumps({'args': args, "
+            "'profile': os.environ.get('AWS_PROFILE')}) + '\\n')\n"
             "if 'describe-stacks' in args:\n"
             "    if any('TokenSecretArn' in value for value in args):\n"
-            "        print(os.environ.get('FAKE_TOKEN_ARN', 'arn:aws:secretsmanager:test:secret:example'))\n"
+            "        print(os.environ.get('FAKE_TOKEN_ARN', "
+            "'arn:aws:secretsmanager:test:secret:example'))\n"
             "    else:\n"
             "        print('fake stack outputs')\n"
             "elif 'get-secret-value' in args:\n"
@@ -71,7 +76,12 @@ class MakefileTests(unittest.TestCase):
         )
         self.aws.chmod(0o755)
 
-    def invoke(self, target, *overrides, extra_environment=None):
+    def invoke(
+        self,
+        target: str,
+        *overrides: str,
+        extra_environment: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         self.config.write_text(
             "\n".join(f"{key}={value}" for key, value in self.values.items()) + "\n",
             encoding="utf-8",
@@ -99,7 +109,7 @@ class MakefileTests(unittest.TestCase):
             check=False,
         )
 
-    def calls(self):
+    def calls(self) -> list[dict[str, object]]:
         if not self.log.exists():
             return []
         return [
@@ -107,7 +117,9 @@ class MakefileTests(unittest.TestCase):
             for line in self.log.read_text(encoding="utf-8").splitlines()
         ]
 
-    def test_deploy_uses_env_and_command_line_overrides_without_splitting_profile(self):
+    def test_deploy_uses_env_and_command_line_overrides_without_splitting_profile(
+        self,
+    ) -> None:
         result = self.invoke("deploy", "RECORD_NAME=override.example.com")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
@@ -129,7 +141,7 @@ class MakefileTests(unittest.TestCase):
             ],
         )
 
-    def test_missing_required_settings_stop_before_any_aws_call(self):
+    def test_missing_required_settings_stop_before_any_aws_call(self) -> None:
         for key in ("HOSTED_ZONE_ID", "RECORD_NAME"):
             with self.subTest(key=key):
                 result = self.invoke("deploy", f"{key}=")
@@ -137,7 +149,7 @@ class MakefileTests(unittest.TestCase):
                 self.assertIn(key, result.stderr)
                 self.assertEqual(self.calls(), [])
 
-    def test_blank_profile_uses_default_credential_chain(self):
+    def test_blank_profile_uses_default_credential_chain(self) -> None:
         result = self.invoke("outputs", "AWS_PROFILE=")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         call = self.calls()[0]
@@ -147,7 +159,7 @@ class MakefileTests(unittest.TestCase):
             call["args"][call["args"].index("--stack-name") + 1], "ixddns-test"
         )
 
-    def test_token_uses_secret_arn_from_the_configured_stack(self):
+    def test_token_uses_secret_arn_from_the_configured_stack(self) -> None:
         result = self.invoke("token")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = self.calls()
@@ -161,19 +173,19 @@ class MakefileTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(result.stdout), {"token": "fake-test-token"})
 
-    def test_missing_secret_arn_stops_before_secret_read(self):
+    def test_missing_secret_arn_stops_before_secret_read(self) -> None:
         result = self.invoke("token", extra_environment={"FAKE_TOKEN_ARN": "None"})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("TokenSecretArn", result.stderr)
         self.assertEqual(len(self.calls()), 1)
 
-    def test_ix_config_requires_interfaces_before_any_aws_call(self):
+    def test_ix_config_requires_interfaces_before_any_aws_call(self) -> None:
         result = self.invoke("ix-config", "IX_WAN_IF=")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("IX_WAN_IF", result.stderr)
         self.assertEqual(self.calls(), [])
 
-    def test_deploy_passes_enabled_asns_as_one_argument(self):
+    def test_deploy_passes_enabled_asns_as_one_argument(self) -> None:
         result = self.invoke(
             "deploy",
             "ASN_RESTRICTION_ENABLED=true",
@@ -186,7 +198,7 @@ class MakefileTests(unittest.TestCase):
         self.assertIn("AsnRestrictionMethod=waf", args)
         self.assertIn("AllowedAsns=64496, 64500", args)
 
-    def test_invalid_or_empty_asn_settings_stop_before_any_aws_call(self):
+    def test_invalid_or_empty_asn_settings_stop_before_any_aws_call(self) -> None:
         for overrides in (
             ("ASN_RESTRICTION_ENABLED=tru",),
             ("ASN_RESTRICTION_METHOD=statc",),
@@ -199,14 +211,12 @@ class MakefileTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.calls(), [])
 
-    def test_disabled_asn_restriction_ignores_the_allow_list(self):
+    def test_disabled_asn_restriction_ignores_the_allow_list(self) -> None:
         result = self.invoke("deploy", "ALLOWED_ASNS=64496")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("AllowedAsns=0", self.calls()[0]["args"])
 
-    def test_static_build_uses_the_env_snapshot_without_aws_calls(self):
-        from test_asn_prefixes import snapshot
-
+    def test_static_build_uses_the_env_snapshot_without_aws_calls(self) -> None:
         source = self.directory / "input.json"
         output = self.directory / "template.json"
         source.write_text(json.dumps(snapshot()), encoding="utf-8")

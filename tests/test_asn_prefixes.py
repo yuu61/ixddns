@@ -10,16 +10,22 @@ import random
 import tempfile
 import unittest
 import zlib
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from urllib.error import URLError
 
 from scripts import asn_prefixes, build_template
 
 
-def snapshot(now=None):
-    now = now or datetime.now(timezone.utc)
+def snapshot(now: datetime | None = None) -> dict[str, object]:
+    """鮮度検証と埋め込みの試験に使う一覧を作る。
+
+    Returns:
+        指定した日時で作成した試験用のCIDR一覧。
+
+    """
+    now = now or datetime.now(UTC)
     return {
         "schema_version": 1,
         "source": asn_prefixes.API_URL,
@@ -30,7 +36,13 @@ def snapshot(now=None):
     }
 
 
-def api_response(now):
+def api_response(now: datetime) -> dict[str, object]:
+    """起点経路と通過経路を含むRIPEstatの模擬応答を作る。
+
+    Returns:
+        起点経路・通過経路・件数を含む模擬応答。
+
+    """
     return {
         "status": "ok",
         "data": {
@@ -46,17 +58,23 @@ def api_response(now):
 
 
 class PrefixTests(unittest.TestCase):
-    def setUp(self):
-        self.now = datetime.now(timezone.utc)
+    """起点経路の取得・鮮度・欠落・公開CIDRの正規化を検証する。"""
+
+    def setUp(self) -> None:
+        self.now = datetime.now(UTC)
         self.result = api_response(self.now)
 
-    def fetch(self, result=None):
+    def fetch(
+        self, result: dict[str, object] | None = None
+    ) -> tuple[dict[str, object], MagicMock]:
         response = io.BytesIO(json.dumps(result or self.result).encode())
         with patch.object(asn_prefixes, "urlopen", return_value=response) as request:
             result = asn_prefixes.fetch_snapshot([3333], self.now)
         return result, request
 
-    def test_fetch_uses_latest_originating_routes_and_never_transiting_routes(self):
+    def test_fetch_uses_latest_originating_routes_and_never_transiting_routes(
+        self,
+    ) -> None:
         result, request = self.fetch()
         self.assertEqual(result["cidrs"], ["8.8.8.0/24", "2606:4700::/32"])
         url = request.call_args.args[0].full_url
@@ -70,7 +88,7 @@ class PrefixTests(unittest.TestCase):
         self.assertNotIn("starttime", url)
         self.assertEqual(request.call_args.kwargs["timeout"], 20)
 
-    def test_failure_and_partial_response_never_create_a_snapshot(self):
+    def test_failure_and_partial_response_never_create_a_snapshot(self) -> None:
         variations = []
         for change in (
             "count",
@@ -79,7 +97,6 @@ class PrefixTests(unittest.TestCase):
             "default",
             "stale",
             "asn",
-            "status",
             "missing",
             "family",
         ):
@@ -91,7 +108,7 @@ class PrefixTests(unittest.TestCase):
                 for family in ("v4", "v6"):
                     data["prefixes"][family]["originating"] = []
                     data["counts"][family]["originating"] = 0
-            elif change in ("private", "default", "family"):
+            elif change in {"private", "default", "family"}:
                 data["prefixes"]["v4"]["originating"] = [
                     {
                         "private": "10.0.0.0/8",
@@ -103,11 +120,10 @@ class PrefixTests(unittest.TestCase):
                 data["query_time"] = (self.now - timedelta(hours=49)).isoformat()
             elif change == "asn":
                 data["resource"] = "9999"
-            elif change == "status":
-                result["status"] = "error"
             elif change == "missing":
                 del data["prefixes"]
             variations.append((change, result))
+        variations.append(("status", {**self.result, "status": "error"}))
         for change, result in variations:
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.fetch(result)
@@ -117,24 +133,27 @@ class PrefixTests(unittest.TestCase):
         ):
             asn_prefixes.fetch_snapshot([3333], self.now)
 
-    def test_every_requested_asn_must_succeed(self):
-        with patch.object(
-            asn_prefixes,
-            "urlopen",
-            side_effect=[
-                io.BytesIO(json.dumps(self.result).encode()),
-                URLError("second ASN failed"),
-            ],
-        ), self.assertRaises(ValueError):
+    def test_every_requested_asn_must_succeed(self) -> None:
+        with (
+            patch.object(
+                asn_prefixes,
+                "urlopen",
+                side_effect=[
+                    io.BytesIO(json.dumps(self.result).encode()),
+                    URLError("second ASN failed"),
+                ],
+            ),
+            self.assertRaises(ValueError),
+        ):
             asn_prefixes.fetch_snapshot([3333, 9999], self.now)
 
-    def test_single_address_family_is_supported(self):
+    def test_single_address_family_is_supported(self) -> None:
         self.result["data"]["prefixes"]["v6"] = {}
         self.result["data"]["counts"]["v6"] = {}
         result, _ = self.fetch()
         self.assertEqual(result["cidrs"], ["8.8.8.0/24"])
 
-    def test_normalization_preserves_exact_ranges(self):
+    def test_normalization_preserves_exact_ranges(self) -> None:
         values = ["8.8.8.0/25", "8.8.8.128/25", "8.8.8.0/25", "8.8.10.0/24"]
         self.assertEqual(
             asn_prefixes.normalize_prefixes(values), ["8.8.8.0/24", "8.8.10.0/24"]
@@ -143,7 +162,7 @@ class PrefixTests(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 asn_prefixes.normalize_prefixes(values)
 
-    def test_offline_snapshot_requires_matching_asns_and_fresh_times(self):
+    def test_offline_snapshot_requires_matching_asns_and_fresh_times(self) -> None:
         for field in (
             "asns",
             "source",
@@ -170,7 +189,9 @@ class PrefixTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
-    def setUp(self):
+    """一覧の埋め込みと生成失敗時の既存ファイル保持を検証する。"""
+
+    def setUp(self) -> None:
         (build_template.PROJECT / ".build").mkdir(exist_ok=True)
         temporary = tempfile.TemporaryDirectory(dir=build_template.PROJECT / ".build")
         self.addCleanup(temporary.cleanup)
@@ -188,14 +209,14 @@ class BuildTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
-    def build(self):
+    def build(self) -> int:
         with (
             patch("sys.argv", ["build_template", "--output", str(self.output)]),
             patch("sys.stdout", new_callable=io.StringIO),
         ):
             return build_template.main()
 
-    def test_static_build_records_snapshot_and_embeds_compressed_payload(self):
+    def test_static_build_records_snapshot_and_embeds_compressed_payload(self) -> None:
         data = snapshot()
         with patch.object(build_template, "fetch_snapshot", return_value=data) as fetch:
             self.assertEqual(self.build(), 0)
@@ -210,7 +231,7 @@ class BuildTests(unittest.TestCase):
             json.loads((self.directory / "asn-prefixes.json").read_text()), data
         )
 
-    def test_failed_fetch_keeps_existing_template_and_snapshot(self):
+    def test_failed_fetch_keeps_existing_template_and_snapshot(self) -> None:
         self.output.write_text("old template")
         cached = self.directory / "asn-prefixes.json"
         cached.write_text("old snapshot")
@@ -224,7 +245,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(self.output.read_text(), "old template")
         self.assertEqual(cached.read_text(), "old snapshot")
 
-    def test_offline_snapshot_is_validated_without_public_api_call(self):
+    def test_offline_snapshot_is_validated_without_public_api_call(self) -> None:
         source = self.directory / "input.json"
         source.write_text(json.dumps(snapshot()))
         os.environ["ASN_PREFIXES_FILE"] = str(source)
@@ -239,7 +260,7 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(self.build(), 1)
         self.assertEqual(self.output.read_bytes(), original)
 
-    def test_disabled_and_waf_builds_never_fetch_prefixes(self):
+    def test_disabled_and_waf_builds_never_fetch_prefixes(self) -> None:
         for enabled, method in (("false", "static"), ("false", "waf"), ("true", "waf")):
             with (
                 self.subTest(enabled=enabled, method=method),
@@ -255,7 +276,7 @@ class BuildTests(unittest.TestCase):
                 self.assertEqual(self.build(), 0)
                 fetch.assert_not_called()
 
-    def test_large_prefix_lists_are_compressed_without_dropping_entries(self):
+    def test_large_prefix_lists_are_compressed_without_dropping_entries(self) -> None:
         data = snapshot()
         data["cidrs"] = [
             f"8.{value // 256}.{value % 256}.0/24" for value in range(3000)
@@ -281,7 +302,9 @@ class BuildTests(unittest.TestCase):
         )
         self.assertEqual(embedded["cidrs"], data["cidrs"])
 
-    def test_oversized_template_stops_without_replacing_existing_artifacts(self):
+    def test_oversized_template_stops_without_replacing_existing_artifacts(
+        self,
+    ) -> None:
         data = snapshot()
         generator = random.Random(0)
         addresses = generator.sample(range(1 << 24), 20000)

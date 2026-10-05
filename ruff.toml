@@ -1,0 +1,43 @@
+# Lambdaとローカルの検証環境に合わせます。
+target-version = "py314"
+required-version = "==0.16.6"
+preview = true
+extend-exclude = [".build", ".tools"]
+
+[lint]
+select = ["ALL"]
+ignore = [
+    "incorrect-blank-line-before-class",   # D211と競合。クラスの説明の前に空行を入れない形式を採用します。
+    "multi-line-summary-second-line",   # D212と競合。複数行の説明も先頭行から書きます。
+    "missing-trailing-period",   # 日本語の説明は「。」を使い、英文のピリオドを要求しません。
+    "missing-terminal-punctuation",   # 同上。日本語の句点を英語の句読点に置き換えません。
+    "missing-copyright-notice", # 著作権者・ライセンスが未指定のため、著作権表示を推測して追加しません。
+    "missing-trailing-comma", # カンマの配置はRuff formatterに統一します。
+]
+
+[lint.per-file-ignores]
+# 追加のテスト依存を持たず、標準ライブラリのunittestで検証します。
+# テスト名とassertionで仕様を示すため、各テストメソッドの説明文は重ねません。
+"tests/*.py" = ["pytest-unittest-assertion", "pytest-unittest-raises-assertion", "undocumented-public-method"]
+# 共有トークンの試験用値と、拒否する0.0.0.0は実際の秘密情報や待受設定ではありません。
+"tests/test_handler.py" = ["hardcoded-password-func-arg", "hardcoded-password-default", "hardcoded-bind-all-interfaces"]
+"tests/test_static_handler.py" = ["hardcoded-password-func-arg", "hardcoded-password-default"]
+# 圧縮容量試験の再現可能なデータ生成であり、暗号・トークン生成には使いません。
+"tests/test_asn_prefixes.py" = ["suspicious-non-cryptographic-random-usage"]
+# AWS CLIの引数配列をshellなしで実行します。実行ファイルは利用者の設定に従います。
+"scripts/generate_ix_config.py" = ["suspicious-subprocess-import", "subprocess-without-shell-equals-true", "print"]
+# Makeと模擬CLIの終了コード・引数を調べるため、プロセスの実行自体が試験対象です。
+"tests/test_makefile.py" = ["suspicious-subprocess-import", "subprocess-without-shell-equals-true"]
+# CLI自体は実行せず、CompletedProcessで模擬する試験用の型を参照します。
+"tests/test_ix_config.py" = ["suspicious-subprocess-import"]
+# 接続先はこのファイルの固定HTTPS APIで、利用者からURLを受け取りません。
+"scripts/asn_prefixes.py" = ["suspicious-url-open-usage"]
+# CLIの生成結果・エラーは標準出力と標準エラーへ表示します。
+"scripts/build_template.py" = ["print"]
+"scripts/check_asn_config.py" = ["print"]
+# CloudFormationのインラインLambdaは単一のindex.pyで、Pythonパッケージではありません。
+# SDK例外の本文に秘密情報があり得るため、トレースバックを含むexceptionログは使いません。
+"lambda/index.py" = ["implicit-namespace-package", "error-instead-of-exception"]
+
+[format]
+line-ending = "lf"

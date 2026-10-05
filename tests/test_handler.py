@@ -1,8 +1,10 @@
 """追加ライブラリの導入やAWSへの接続を行わず、実際のインラインLambdaを検証する。"""
 
+import importlib.util
 import json
 import os
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -11,22 +13,34 @@ from urllib.parse import urlencode
 
 
 class ClientError(Exception):
-    pass
+    """AWSクライアントの失敗を再現する試験用例外。"""
 
 
 class BotoCoreError(Exception):
-    pass
+    """SDKの通信失敗を再現する試験用例外。"""
 
 
-def load_handler(route53, secrets, code=None):
+def load_handler(
+    route53: MagicMock, secrets: MagicMock, code: str | None = None
+) -> types.ModuleType:
+    """Lambdaソースを通常のモジュールとして、モックしたSDKとともに読み込む。
+
+    Returns:
+        AWSクライアントをモックしたLambdaモジュール。
+
+    Raises:
+        AssertionError: 試験対象のLambdaコードを読み込めない場合。
+
+    """
     code = code or (
         Path(__file__).resolve().parents[1] / "lambda" / "index.py"
     ).read_text(encoding="utf-8")
     if not code.strip():
-        raise AssertionError("Lambdaのコードが空です。")
+        message = "Lambdaのコードが空です。"
+        raise AssertionError(message)
 
     boto3 = types.ModuleType("boto3")
-    boto3.client = lambda service, **kwargs: {
+    boto3.client = lambda service, **_kwargs: {
         "route53": route53,
         "secretsmanager": secrets,
     }[service]
@@ -36,21 +50,29 @@ def load_handler(route53, secrets, code=None):
     exceptions = types.ModuleType("botocore.exceptions")
     exceptions.ClientError = ClientError
     exceptions.BotoCoreError = BotoCoreError
-    module = types.ModuleType("ddns_lambda")
     modules = {
         "boto3": boto3,
         "botocore": botocore,
         "botocore.config": config,
         "botocore.exceptions": exceptions,
     }
-    with patch.dict(sys.modules, modules):
-        # リポジトリ内のLambdaコードを、AWSクライアントをモックした状態で検証します。
-        exec(compile(code, "lambda/index.py", "exec"), module.__dict__)  # noqa: S102
+    with tempfile.TemporaryDirectory(prefix="ddns-lambda-") as directory:
+        path = Path(directory) / "index.py"
+        path.write_text(code, encoding="utf-8")
+        specification = importlib.util.spec_from_file_location("ddns_lambda", path)
+        if specification is None or specification.loader is None:
+            message = "Lambdaのモジュールを読み込めません。"
+            raise AssertionError(message)
+        module = importlib.util.module_from_spec(specification)
+        with patch.dict(sys.modules, modules):
+            specification.loader.exec_module(module)
     return module
 
 
 class HandlerTests(unittest.TestCase):
-    def setUp(self):
+    """通知の認証・IP検証・DNS更新とログの扱いを検証する。"""
+
+    def setUp(self) -> None:
         self.route53 = MagicMock()
         self.route53.change_resource_record_sets.return_value = {
             "ChangeInfo": {"Id": "/change/test"}
@@ -75,14 +97,20 @@ class HandlerTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
-    def invoke(self, ip="8.8.8.8", token="correct-token", method="GET", raw=None):
+    def invoke(
+        self,
+        ip: str = "8.8.8.8",
+        token: str = "correct-token",
+        method: str = "GET",
+        raw: str | None = None,
+    ) -> dict[str, object]:
         query = urlencode({"ip": ip, "token": token}) if raw is None else raw
         return self.module.handler(
             {"rawQueryString": query, "requestContext": {"http": {"method": method}}},
             None,
         )
 
-    def test_valid_request_updates_only_the_configured_record(self):
+    def test_valid_request_updates_only_the_configured_record(self) -> None:
         result = self.invoke()
         self.assertEqual(result["statusCode"], 200)
         self.assertEqual(
@@ -107,13 +135,13 @@ class HandlerTests(unittest.TestCase):
         )
         self.assertEqual(result["headers"]["Cache-Control"], "no-store")
 
-    def test_missing_or_wrong_or_non_ascii_token_cannot_update_dns(self):
+    def test_missing_or_wrong_or_non_ascii_token_cannot_update_dns(self) -> None:
         for token in ("", "wrong-token", "不正なトークン", "x" * 128):
             with self.subTest(token=token):
                 self.assertEqual(self.invoke(token=token)["statusCode"], 401)
         self.route53.change_resource_record_sets.assert_not_called()
 
-    def test_token_replacement_takes_effect_on_next_request(self):
+    def test_token_replacement_takes_effect_on_next_request(self) -> None:
         self.assertEqual(self.invoke()["statusCode"], 200)
         self.route53.reset_mock()
         self.secrets.get_secret_value.return_value = {
@@ -123,7 +151,7 @@ class HandlerTests(unittest.TestCase):
         self.route53.change_resource_record_sets.assert_not_called()
         self.assertEqual(self.invoke(token="replacement-token")["statusCode"], 200)
 
-    def test_non_public_ipv4_addresses_are_rejected(self):
+    def test_non_public_ipv4_addresses_are_rejected(self) -> None:
         for ip in (
             "10.0.0.1",
             "127.0.0.1",
@@ -138,13 +166,13 @@ class HandlerTests(unittest.TestCase):
                 self.assertEqual(self.invoke(ip=ip)["statusCode"], 400)
         self.route53.change_resource_record_sets.assert_not_called()
 
-    def test_invalid_or_missing_ip_is_rejected(self):
+    def test_invalid_or_missing_ip_is_rejected(self) -> None:
         for ip in ("", "not-an-ip", "8.8.8.8/32", "8.8.8.8,1.1.1.1"):
             with self.subTest(ip=ip):
                 self.assertEqual(self.invoke(ip=ip)["statusCode"], 400)
         self.route53.change_resource_record_sets.assert_not_called()
 
-    def test_duplicate_and_unknown_query_parameters_are_rejected(self):
+    def test_duplicate_and_unknown_query_parameters_are_rejected(self) -> None:
         for raw in (
             "ip=8.8.8.8&ip=1.1.1.1&token=correct-token",
             "ip=8.8.8.8&token=correct-token&token=correct-token",
@@ -157,12 +185,12 @@ class HandlerTests(unittest.TestCase):
         self.route53.change_resource_record_sets.assert_not_called()
         self.secrets.get_secret_value.assert_not_called()
 
-    def test_post_cannot_update_dns(self):
+    def test_post_cannot_update_dns(self) -> None:
         self.assertEqual(self.invoke(method="POST")["statusCode"], 405)
         self.route53.change_resource_record_sets.assert_not_called()
         self.secrets.get_secret_value.assert_not_called()
 
-    def test_ipv6_and_record_family_are_checked(self):
+    def test_ipv6_and_record_family_are_checked(self) -> None:
         self.assertEqual(self.invoke(ip="2606:4700:4700::1111")["statusCode"], 400)
         with patch.dict(os.environ, {"RECORD_TYPE": "AAAA"}):
             self.assertEqual(self.invoke(ip="8.8.8.8")["statusCode"], 400)
@@ -175,7 +203,7 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(record["Type"], "AAAA")
         self.assertEqual(record["ResourceRecords"], [{"Value": "2606:4700:4700::1111"}])
 
-    def test_non_routable_or_scoped_ipv6_is_rejected(self):
+    def test_non_routable_or_scoped_ipv6_is_rejected(self) -> None:
         with patch.dict(os.environ, {"RECORD_TYPE": "AAAA"}):
             for ip in (
                 "::1",
@@ -192,7 +220,7 @@ class HandlerTests(unittest.TestCase):
                     self.assertEqual(self.invoke(ip=ip)["statusCode"], 400)
         self.route53.change_resource_record_sets.assert_not_called()
 
-    def test_aws_error_returns_retryable_failure_without_secret_in_logs(self):
+    def test_aws_error_returns_retryable_failure_without_secret_in_logs(self) -> None:
         self.route53.change_resource_record_sets.side_effect = ClientError(
             "sensitive-sdk-message"
         )
@@ -203,13 +231,13 @@ class HandlerTests(unittest.TestCase):
         self.assertNotIn("sensitive-sdk-message", output)
         self.assertNotIn("correct-token", output)
 
-    def test_secret_read_failure_never_mutates_dns(self):
+    def test_secret_read_failure_never_mutates_dns(self) -> None:
         self.secrets.get_secret_value.side_effect = BotoCoreError("read failed")
         with self.assertLogs("ddns_lambda", level="ERROR"):
             self.assertEqual(self.invoke()["statusCode"], 503)
         self.route53.change_resource_record_sets.assert_not_called()
 
-    def test_malformed_secret_never_mutates_dns(self):
+    def test_malformed_secret_never_mutates_dns(self) -> None:
         for secret in ({}, {"token": ""}, {"token": 123}, {"token": None}):
             with self.subTest(secret=secret):
                 self.secrets.get_secret_value.return_value = {
@@ -219,7 +247,7 @@ class HandlerTests(unittest.TestCase):
                     self.assertEqual(self.invoke()["statusCode"], 503)
         self.route53.change_resource_record_sets.assert_not_called()
 
-    def test_rest_api_updates_with_the_same_authentication_and_ip_checks(self):
+    def test_rest_api_updates_with_the_same_authentication_and_ip_checks(self) -> None:
         event = {
             "httpMethod": "GET",
             "multiValueQueryStringParameters": {
@@ -237,7 +265,7 @@ class HandlerTests(unittest.TestCase):
         self.assertEqual(self.module.handler(event, None)["statusCode"], 400)
         self.route53.change_resource_record_sets.assert_not_called()
 
-    def test_rest_api_duplicate_or_malformed_queries_never_update_dns(self):
+    def test_rest_api_duplicate_or_malformed_queries_never_update_dns(self) -> None:
         for query in (
             {"ip": ["8.8.8.8", "1.1.1.1"], "token": ["correct-token"]},
             {"ip": ["8.8.8.8"], "token": ["correct-token", "correct-token"]},

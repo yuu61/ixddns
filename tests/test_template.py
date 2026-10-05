@@ -7,13 +7,15 @@ from scripts.check_asn_config import check_asn_config
 
 
 class TemplateTests(unittest.TestCase):
-    def setUp(self):
+    """生成テンプレートのAPI方式と共通リソースの維持を検証する。"""
+
+    def setUp(self) -> None:
         self.template = build_template()
 
-    def active_resources(self, enabled, method="waf"):
+    def active_resources(self, enabled: str, method: str = "waf") -> dict[str, object]:
         conditions = self.template["Conditions"]
 
-        def evaluate(expression):
+        def evaluate(expression: object) -> object:
             if not isinstance(expression, dict):
                 return expression
             if "Ref" in expression:
@@ -30,7 +32,8 @@ class TemplateTests(unittest.TestCase):
                 return not evaluate(expression["Fn::Not"][0])
             if "Fn::And" in expression:
                 return all(evaluate(item) for item in expression["Fn::And"])
-            self.fail(f"未対応の条件式です: {expression}")
+            message = f"未対応の条件式です: {expression}"
+            raise AssertionError(message)
 
         return {
             name: resource
@@ -39,7 +42,7 @@ class TemplateTests(unittest.TestCase):
             or evaluate(conditions[resource["Condition"]])
         }
 
-    def test_disabled_mode_has_http_api_and_no_waf_or_rest_api(self):
+    def test_disabled_mode_has_http_api_and_no_waf_or_rest_api(self) -> None:
         active = self.active_resources("false")
         self.assertIn("HttpApi", active)
         self.assertIn("InvokePermission", active)
@@ -54,7 +57,7 @@ class TemplateTests(unittest.TestCase):
                 ),
             )
 
-    def test_enabled_mode_has_only_the_waf_protected_rest_api(self):
+    def test_enabled_mode_has_only_the_waf_protected_rest_api(self) -> None:
         active = self.active_resources("true")
         for name in (
             "RestApi",
@@ -82,7 +85,7 @@ class TemplateTests(unittest.TestCase):
             active["WafAssociation"]["Properties"]["ResourceArn"]["Fn::Sub"],
         )
 
-    def test_static_mode_uses_http_api_without_waf(self):
+    def test_static_mode_uses_http_api_without_waf(self) -> None:
         for enabled in ("true", "false"):
             active = self.active_resources(enabled, "static")
             self.assertIn("HttpApi", active)
@@ -91,11 +94,11 @@ class TemplateTests(unittest.TestCase):
             self.assertNotIn("DdnsWebAcl", active)
             self.assertNotIn("WafAssociation", active)
 
-    def test_invalid_method_is_rejected(self):
+    def test_invalid_method_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             check_asn_config("true", "64496", "statc")
 
-    def test_shared_secret_function_and_logs_survive_mode_switches(self):
+    def test_shared_secret_function_and_logs_survive_mode_switches(self) -> None:
         disabled = self.active_resources("false")
         enabled = self.active_resources("true")
         for name in (
@@ -113,7 +116,7 @@ class TemplateTests(unittest.TestCase):
         )
         self.assertEqual(enabled["SharedToken"]["DeletionPolicy"], "Retain")
 
-    def test_rest_stage_references_the_generated_deployment(self):
+    def test_rest_stage_references_the_generated_deployment(self) -> None:
         resources = self.template["Resources"]
         deployment = resources["RestStage"]["Properties"]["DeploymentId"]["Ref"]
         self.assertIn(deployment, resources)
@@ -123,7 +126,9 @@ class TemplateTests(unittest.TestCase):
 
 
 class AsnConfigTests(unittest.TestCase):
-    def test_enabled_mode_requires_a_nonempty_numeric_allow_list(self):
+    """許可ASNの形式と制限方式の設定を検証する。"""
+
+    def test_enabled_mode_requires_a_nonempty_numeric_allow_list(self) -> None:
         for allowed in (
             "",
             "0",
@@ -140,7 +145,7 @@ class AsnConfigTests(unittest.TestCase):
         check_asn_config("true", "64496, 64500")
         check_asn_config("true", "4294967295")
 
-    def test_disabled_mode_ignores_asns_but_typo_in_switch_is_rejected(self):
+    def test_disabled_mode_ignores_asns_but_typo_in_switch_is_rejected(self) -> None:
         check_asn_config("false", "")
         check_asn_config("false", "AS64496")
         for enabled in ("True", "tru", "1", ""):

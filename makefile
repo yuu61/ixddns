@@ -39,7 +39,10 @@ CFN_LINT ?= .venv/bin/cfn-lint
 CFN_GUARD ?= cfn-guard
 endif
 
-.PHONY: build validate test lint guard check-config check-asn-config check-stack-config deploy outputs token ix-config
+.PHONY: install-dev build validate test lint guard ruff format check-config check-asn-config check-stack-config deploy outputs token ix-config
+
+install-dev:
+	"$(PYTHON)" -m pip install --requirement requirements-dev.txt
 
 # 設定値は環境変数とクォート付きのシェル引数で渡します。
 define aws_setup
@@ -106,7 +109,15 @@ test:
 build:
 	@"$(PYTHON)" -m scripts.build_template --output "$(TEMPLATE)"
 
-lint: build
+ruff:
+	"$(PYTHON)" -m ruff check . --ignore-noqa
+	"$(PYTHON)" -m ruff format --check .
+
+format:
+	"$(PYTHON)" -m ruff check . --fix --ignore-noqa
+	"$(PYTHON)" -m ruff format .
+
+lint: ruff build
 	"$(CFN_LINT)" --template "$(TEMPLATE)" --regions "$(REGION)" --format json
 
 guard: lint
