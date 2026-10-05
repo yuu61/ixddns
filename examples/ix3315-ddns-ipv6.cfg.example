@@ -1,4 +1,4 @@
-! IX3315向けRoute 53 DDNS設定 / IPv6（AAAAレコード）をIPv4のHTTPSで通知
+! NEC IX向けRoute 53 DDNS設定 / IPv6（AAAAレコード）をIPv4のHTTPSで通知
 ! RECORD_TYPE=AAAAと別のSTACK_NAMEを指定して、IPv6用スタックを作成してください。
 ! 参照資料: IX2000/IX3000マニュアル Ver.10.11-1.1
 ! Administrator権限のオペレーションモードから投入してください。

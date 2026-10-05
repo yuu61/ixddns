@@ -82,7 +82,7 @@ class Settings:
             interfaces=interfaces,
             output=Path(output)
             if output
-            else PROJECT / "examples" / f"ix3315-ddns-{family}.cfg",
+            else PROJECT / "examples" / f"nec-ix-ddns-{family}.cfg",
         )
 
 
@@ -297,7 +297,7 @@ def config_template(record_type: str) -> Path:
 
     """
     family = "ipv4" if record_type == "A" else "ipv6"
-    return PROJECT / "examples" / f"ix3315-ddns-{family}.cfg.example"
+    return PROJECT / "examples" / f"nec-ix-ddns-{family}.cfg.example"
 
 
 def main() -> int:

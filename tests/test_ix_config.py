@@ -244,7 +244,7 @@ class IxConfigTests(unittest.TestCase):
                     settings = generator.Settings.from_environment()
                 self.assertEqual(
                     settings.output,
-                    generator.PROJECT / "examples" / f"ix3315-ddns-{family}.cfg",
+                    generator.PROJECT / "examples" / f"nec-ix-ddns-{family}.cfg",
                 )
 
     def test_asn_mode_and_allow_list_must_match_the_deployed_stack(self) -> None:

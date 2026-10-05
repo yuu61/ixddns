@@ -1,4 +1,4 @@
-! IX3315向けRoute 53 DDNS設定 / IPv4（Aレコード）
+! NEC IX向けRoute 53 DDNS設定 / IPv4（Aレコード）
 ! 参照資料: IX2000/IX3000マニュアル Ver.10.11-1.1
 ! Administrator権限のオペレーションモードから投入してください。
 ! WAN接続、ルーティング、IX自身のDNS名前解決が動作する状態を前提とします。

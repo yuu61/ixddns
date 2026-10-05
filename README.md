@@ -1,9 +1,9 @@
-# IX3315 / Route 53 DDNS
+# NEC IX / Route 53 DDNS
 
 NEC IXの標準DDNSクライアントからHTTPSでIPアドレスを通知し、AWS LambdaでRoute 53のAまたはAAAAレコードを更新します。AWSアクセスキーをIXに保存する必要はありません。
 
 ```text
-IX3315 → Function URL または WAF + REST API → Lambda → Route 53
+NEC IX → Function URL または WAF + REST API → Lambda → Route 53
                                               ↕
                                        Secrets Manager（共有トークン）
 ```
@@ -61,7 +61,7 @@ IX_WAN_IF=GigaEthernet0.1
 make ix-config
 ```
 
-デプロイ済みスタックのURLと共有トークンを取得し、`examples/ix3315-ddns-ipv4.cfg`を生成します。実行するAWS認証には`cloudformation:DescribeStacks`と対象シークレットの`secretsmanager:GetSecretValue`が必要です。`.env`とスタックの設定が一致しない場合は生成を停止するため、AWS側の設定変更は先にデプロイしてください。
+デプロイ済みスタックのURLと共有トークンを取得し、`examples/nec-ix-ddns-ipv4.cfg`を生成します。実行するAWS認証には`cloudformation:DescribeStacks`と対象シークレットの`secretsmanager:GetSecretValue`が必要です。`.env`とスタックの設定が一致しない場合は生成を停止するため、AWS側の設定変更は先にデプロイしてください。
 
 生成ファイルを確認し、Administrator権限のオペレーションモードからIXへ投入します。グローバルコンフィグモードから投入する場合は先頭の`configure`を省いてください。
 
@@ -69,7 +69,7 @@ make ix-config
 - サンプルの`service ssl-protocol`は他のHTTPSクライアント機能にも影響します。`service password-encryption`で暗号化したパスワードは平文表示へ戻せません。
 - `<IP4>`・`<IP6>`・`<PW>`はIXが置換するマクロなので、そのまま残してください。
 
-サンプルはIX2000/IX3000のVer.10.11-1.1のマニュアルに基づきます。実機への投入・接続試験は未実施です。[IPv4サンプル](examples/ix3315-ddns-ipv4.cfg.example)、[IPv6サンプル](examples/ix3315-ddns-ipv6.cfg.example)も参照してください。
+サンプルはIX2000/IX3000のVer.10.11-1.1のマニュアルに基づきます。実機への投入・接続試験は未実施です。[IPv4サンプル](examples/nec-ix-ddns-ipv4.cfg.example)、[IPv6サンプル](examples/nec-ix-ddns-ipv6.cfg.example)も参照してください。
 
 ### 4. 更新を確認する
 
@@ -101,7 +101,7 @@ make deploy ENV_FILE=.env.ipv6
 make ix-config ENV_FILE=.env.ipv6
 ```
 
-`examples/ix3315-ddns-ipv6.cfg`を生成します。A/AAAAとも、HTTPS通信はIPv4を使います。
+`examples/nec-ix-ddns-ipv6.cfg`を生成します。A/AAAAとも、HTTPS通信はIPv4を使います。
 
 ## 送信元ASNによる制限（任意）
 
