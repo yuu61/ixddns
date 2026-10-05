@@ -10,6 +10,12 @@
 ! <NOTIFY_IF>をグローバルIPv6アドレスを持つ実機のインタフェース名に置換してください。
 ! <IP6>と<PW>はIXのDDNSマクロなので、そのまま残してください。
 !
+! 通知はIXの標準DDNSクライアントが実行し、IX上の独自スクリプトは不要です。
+! notify-interface（.envのIX_NOTIFY_IF）のIPアドレス変更から約10秒後に自動通知します。
+! source-interface（.envのIX_SOURCE_IF）はHTTPSのIPv4送信元です。
+! update-interval 1はアドレス変更がない場合にも1時間ごとに通知する設定です。
+! リンクのup/downだけで同じIPに復旧した場合の通知は、参照資料では確認できません。
+!
 configure
 !
 ! DDNSを含むHTTPSクライアント機能に共通の設定です。

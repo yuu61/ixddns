@@ -217,7 +217,23 @@ show ddns route53-ipv4
 
 `show ddns`の応答内容、AWS側のログ、実際のDNSレコードを確認してから、グローバルコンフィグモードで`write memory`を実行して保存します。サンプルでは保存コマンドをコメントにしてあります。
 
-インタフェースのアドレス変更から約10秒後に通知されます。上の設定では変化がなくても1時間ごとに通知します。標準DDNSにこの機能があるため、別途スケジューラを設定する必要はありません。
+### IXからの通知トリガー
+
+IX側は標準DDNSクライアントが通知を実行します。IX上で独自スクリプトを起動する設定はありません。`make ix-config`は作業PCで投入用コンフィグを生成するためのコマンドです。
+
+| トリガー | 通知タイミング |
+| --- | --- |
+| 監視対象インタフェースのIPアドレス変更 | 変更の約10秒後 |
+| アドレス変更がない場合の定期更新 | サンプルの`update-interval 1`では1時間ごと（IXのデフォルトは24時間） |
+| `ddns update プロファイル名`の実行 | 即時。サンプルでは設定投入後の初回通知に使用 |
+
+監視対象は`notify-interface`で、未指定なら`source-interface`です。IPv4サンプルでは`.env`の`IX_WAN_IF`、IPv6サンプルでは`IX_NOTIFY_IF`に指定したインタフェースのアドレス変更を監視します。`update-interval 1`は変更の監視間隔ではなく、アドレスが変わらない場合にも通知する周期です。アドレス変更時の通知は、この1時間を待たずに実行されるため、別途スケジューラを設定する必要はありません。
+
+回線再接続などで対象インタフェースのIPが変われば、IX自身が変更を検知してAWSへ通知します。下位サーバーから外部IPを定期的に調べる方式と比較した場合、この変更検知がIXに移すメリットになります。
+
+ただし、マニュアルに明記されているトリガーは**IPアドレスの変化**です。リンクのup/downだけで、同じIPのまま復旧した場合にも必ず通知するかは、参照した資料では確認できません。「リンクが復旧するたびに、IPの変化に関係なく即時通知する」動作は保証していません。以上は機能説明書 Ver.10.11-1.1 §2.25.3（PDFの物理ページ404）とコマンドリファレンスの`notify-interface`・`source-interface`・`update-interval`・`ddns update`に基づく説明で、実機での動作確認は未実施です。
+
+### IPv6用の設定
 
 IPv6用スタックは設定ファイルで`RECORD_TYPE=AAAA`と別の`STACK_NAME`を指定して作成します。`IX_SOURCE_IF`はHTTPSをIPv4で送信するインタフェース、`IX_NOTIFY_IF`は登録するグローバルIPv6を持つインタフェースを指定します。両インタフェースは同じものを指定することもできます。
 
@@ -347,7 +363,7 @@ API、Lambda、IAMロールは削除されます。ホストゾーンと、Lambd
 ## 参照
 
 - [NEC: DDNS FAQ](https://jpn.nec.com/univerge/ix/faq/ddns.html)
-- NEC IX2000/IX3000 機能説明書 Ver.10.11-1.1、§2.25（DDNS、特にGET方式と応答判定の制約）。
+- NEC IX2000/IX3000 機能説明書 Ver.10.11-1.1、§2.25（DDNS）。§2.25.3（PDFの物理ページ404）に通知トリガー、§2.25.4にGET方式と応答判定の制約を記載。
 - NEC IX2000/IX3000 コマンドリファレンス Ver.10.11-1.1、`service ssl-protocol`、`ddns`関連コマンド。
 - [AWS: Route 53更新API](https://docs.aws.amazon.com/Route53/latest/APIReference/API_ChangeResourceRecordSets.html)
 - [AWS: Route 53のレコード単位のIAM条件](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html)
