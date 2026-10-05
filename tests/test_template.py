@@ -42,15 +42,17 @@ class TemplateTests(unittest.TestCase):
             or evaluate(conditions[resource["Condition"]])
         }
 
-    def test_disabled_mode_has_http_api_and_no_waf_or_rest_api(self) -> None:
+    def test_disabled_mode_has_function_url_and_no_waf_or_api_gateway(self) -> None:
         active = self.active_resources("false")
-        self.assertIn("HttpApi", active)
-        self.assertIn("InvokePermission", active)
+        self.assertIn("UpdateFunctionUrl", active)
+        self.assertIn("FunctionUrlPermission", active)
+        self.assertIn("FunctionUrlInvokePermission", active)
         for resource in active.values():
             self.assertNotIn(
                 resource["Type"],
                 (
                     "AWS::ApiGateway::RestApi",
+                    "AWS::ApiGatewayV2::Api",
                     "AWS::WAFv2::WebACL",
                     "AWS::WAFv2::WebACLAssociation",
                     "AWS::WAFv2::LoggingConfiguration",
@@ -69,8 +71,9 @@ class TemplateTests(unittest.TestCase):
             "WafLogging",
         ):
             self.assertIn(name, active)
-        self.assertNotIn("HttpApi", active)
-        self.assertNotIn("InvokePermission", active)
+        self.assertNotIn("UpdateFunctionUrl", active)
+        self.assertNotIn("FunctionUrlPermission", active)
+        self.assertNotIn("FunctionUrlInvokePermission", active)
         for resource in active.values():
             self.assertNotEqual(resource["Type"], "AWS::ApiGatewayV2::Api")
         acl = active["DdnsWebAcl"]["Properties"]
@@ -85,11 +88,12 @@ class TemplateTests(unittest.TestCase):
             active["WafAssociation"]["Properties"]["ResourceArn"]["Fn::Sub"],
         )
 
-    def test_static_mode_uses_http_api_without_waf(self) -> None:
+    def test_static_mode_uses_function_url_without_waf(self) -> None:
         for enabled in ("true", "false"):
             active = self.active_resources(enabled, "static")
-            self.assertIn("HttpApi", active)
-            self.assertIn("InvokePermission", active)
+            self.assertIn("UpdateFunctionUrl", active)
+            self.assertIn("FunctionUrlPermission", active)
+            self.assertIn("FunctionUrlInvokePermission", active)
             self.assertNotIn("RestApi", active)
             self.assertNotIn("DdnsWebAcl", active)
             self.assertNotIn("WafAssociation", active)
@@ -106,7 +110,6 @@ class TemplateTests(unittest.TestCase):
             "FunctionRole",
             "UpdateFunction",
             "FunctionLogGroup",
-            "ApiAccessLogGroup",
             "WafLogGroup",
         ):
             self.assertEqual(disabled[name], enabled[name])

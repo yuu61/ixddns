@@ -6,7 +6,7 @@ Resources:
       com.aws.cloudformation.Context:
         why: ASN制限をAPI到達時に適用するため、WAFを直接関連付けられるREST APIを使う。
         must:
-          - 有効時はHTTP APIを作成せず、WAFを迂回できる別の更新窓口を残さない。
+          - 有効時はFunction URLを作成せず、WAFを迂回できる別の更新窓口を残さない。
     Properties:
       Name: !Sub "${AWS::StackName}-ddns-asn"
       EndpointConfiguration:

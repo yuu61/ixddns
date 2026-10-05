@@ -27,7 +27,7 @@ class IxConfigTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.output = self.directory / "generated" / "router.cfg"
         self.token = "Ab0123456789" * 4
-        self.url = "https://example.execute-api.ap-northeast-1.amazonaws.com/update"
+        self.url = "https://abcdefghijklmnopqrstuvwxyz012345.lambda-url.ap-northeast-1.on.aws/update"
         self.environment = {
             "AWS": "aws",
             "AWS_PROFILE": "profile with spaces",
@@ -266,8 +266,8 @@ class IxConfigTests(unittest.TestCase):
         self.assertIn("AllowedAsns", stderr)
         self.assertEqual(run.call_count, 1)
         self.stack["Stacks"][0]["Parameters"][-1]["ParameterValue"] = "64500, 64496"
-        self.stack["Stacks"][0]["Outputs"][0]["OutputValue"] = self.url.replace(
-            "/update", "/ddns/update"
+        self.stack["Stacks"][0]["Outputs"][0]["OutputValue"] = (
+            "https://example.execute-api.ap-northeast-1.amazonaws.com/ddns/update"
         )
         code, _, stderr, _ = self.invoke()
         self.assertEqual(code, 0, stderr)

@@ -51,7 +51,7 @@ class RequestError(Exception):
 
 
 def source_allowed(event: dict[str, object]) -> bool:
-    """送信元IPをAPI Gatewayの情報から取得し、CIDR一覧と照合する。
+    """送信元IPをFunction URLまたはREST APIの情報から取得し、CIDR一覧と照合する。
 
     Returns:
         送信元が許可される場合はTrue。
@@ -94,7 +94,7 @@ def response(status_code: int, status: str, **details: str) -> dict[str, object]
     """キャッシュを禁止したJSON形式のHTTP応答を作る。
 
     Returns:
-        API Gatewayへ返す状態コード・ヘッダー・JSON本文。
+        更新窓口へ返す状態コード・ヘッダー・JSON本文。
 
     """
     return {
@@ -218,6 +218,9 @@ def update(event: dict[str, object]) -> dict[str, object]:
     )
     if method != "GET":
         return response(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed")
+    # Function URLは全パスを関数へ渡すため、REST APIと同じ更新ルートに限定します。
+    if event.get("rawPath", event.get("resource")) != "/update":
+        return response(HTTPStatus.NOT_FOUND, "not_found")
     if not source_allowed(event):
         logger.warning("ddns_source_rejected")
         return response(HTTPStatus.FORBIDDEN, "source_not_allowed")

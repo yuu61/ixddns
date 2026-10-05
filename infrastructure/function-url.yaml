@@ -1,0 +1,52 @@
+Resources:
+  UpdateFunctionUrl:
+    Condition: UseFunctionUrl
+    Type: AWS::Lambda::Url
+    DependsOn: [FunctionUrlPermission, FunctionUrlInvokePermission]
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: IXの署名なしHTTPS通知を、API Gatewayを介さずLambdaへ渡す。
+        must:
+          - AuthTypeはNONEとし、Lambdaで共有トークンを検証してからDNSを更新する。
+          - WAF方式では作成せず、WAFを迂回する窓口を残さない。
+          - 通常のコード更新ではURLを維持する。
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt UpdateFunction.Arn
+      InvokeMode: BUFFERED
+
+  FunctionUrlPermission:
+    Condition: UseFunctionUrl
+    Type: AWS::Lambda::Permission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: IXから公開Function URLへアクセスするための権限を付与する。
+        must:
+          - この関数のAuthType NONEのFunction URLに限定する。
+    Properties:
+      FunctionName: !Ref UpdateFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  FunctionUrlInvokePermission:
+    Condition: UseFunctionUrl
+    Type: AWS::Lambda::Permission
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Function URLの呼び出しに必要なInvokeFunction権限も付与する。
+        must:
+          - URL経由の実行に限定し、公開権限でのInvoke API直接呼び出しを許可しない。
+    Properties:
+      FunctionName: !Ref UpdateFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  UpdateUrl:
+    Description: IXのDDNSプロファイルに設定するHTTPS URLです。クエリは別途設定してください。
+    Value: !If
+      - UseWaf
+      - !Sub "https://${RestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/ddns/update"
+      - !Sub "${UpdateFunctionUrl.FunctionUrl}update"

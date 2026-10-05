@@ -17,7 +17,7 @@ from scripts.check_asn_config import check_asn_config
 
 PROJECT = Path(__file__).resolve().parents[1]
 MAX_TEMPLATE_BYTES = 51200
-FRAGMENTS = ("http-api.yaml", "rest-api.yaml", "waf.yaml")
+FRAGMENTS = ("function-url.yaml", "rest-api.yaml", "waf.yaml")
 
 
 def read_definition(path: Path) -> dict[str, object]:

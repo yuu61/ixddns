@@ -42,12 +42,20 @@ rule secret_read_is_scoped {
 }
 
 rule invocation_is_scoped {
-    Resources.InvokePermission.Properties {
-        Principal == 'apigateway.amazonaws.com'
-        SourceAccount.Ref == 'AWS::AccountId'
-        SourceArn.'Fn::Sub' == 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/GET/update'
+    Resources.FunctionUrlPermission.Condition == 'UseFunctionUrl'
+    Resources.FunctionUrlPermission.Properties {
+        FunctionName.Ref == 'UpdateFunction'
+        Action == 'lambda:InvokeFunctionUrl'
+        Principal == '*'
+        FunctionUrlAuthType == 'NONE'
     }
-    Resources.InvokePermission.Condition == 'UseHttpApi'
+    Resources.FunctionUrlInvokePermission.Condition == 'UseFunctionUrl'
+    Resources.FunctionUrlInvokePermission.Properties {
+        FunctionName.Ref == 'UpdateFunction'
+        Action == 'lambda:InvokeFunction'
+        Principal == '*'
+        InvokedViaFunctionUrl == true
+    }
     Resources.RestInvokePermission.Condition == 'UseWaf'
     Resources.RestInvokePermission.Properties {
         Principal == 'apigateway.amazonaws.com'
@@ -59,17 +67,22 @@ rule invocation_is_scoped {
 rule logs_omit_authentication_values {
     Resources.UpdateFunction.Properties.LoggingConfig.LogFormat == 'JSON'
     Resources.FunctionLogGroup.Properties.RetentionInDays exists
-    Resources.ApiAccessLogGroup.Properties.RetentionInDays exists
-    Resources.ApiStage.Properties.AccessLogSettings.Format !in [ /(?i).*token.*/, /(?i).*querystring.*/, /(?i).*authorization.*/ ]
+    Resources.ApiAccessLogGroup !exists
+    Resources.RestStage.Properties.AccessLogSetting !exists
 }
 
 rule api_exposes_only_the_ddns_route {
-    Resources.HttpApi.Condition == 'UseHttpApi'
-    Resources.HttpApi.Properties.ProtocolType == 'HTTP'
-    Resources.UpdateRoute.Properties.RouteKey == 'GET /update'
-    Resources.LambdaIntegration.Properties.PayloadFormatVersion == '2.0'
-    Resources.ApiStage.Properties.DefaultRouteSettings.ThrottlingRateLimit <= 1
-    Resources.ApiStage.Properties.DefaultRouteSettings.ThrottlingBurstLimit <= 2
+    Resources.UpdateFunctionUrl.Condition == 'UseFunctionUrl'
+    Resources.UpdateFunctionUrl.Properties {
+        AuthType == 'NONE'
+        TargetFunctionArn.'Fn::GetAtt' == ['UpdateFunction', 'Arn']
+        InvokeMode == 'BUFFERED'
+        Cors !exists
+    }
+    Resources.UpdateFunction.Properties.ReservedConcurrentExecutions.'Fn::If' == [ 'UseFunctionUrl', { 'Ref': 'LambdaReservedConcurrency' }, { 'Ref': 'AWS::NoValue' } ]
+    Parameters.LambdaReservedConcurrency.MinValue == 1
+    Parameters.LambdaReservedConcurrency.Default == 1
+    Resources.HttpApi !exists
     Resources.RestApi.Condition == 'UseWaf'
     Resources.RestUpdateMethod.Properties.HttpMethod == 'GET'
     Resources.RestUpdateMethod.Properties.Integration.Type == 'AWS_PROXY'
@@ -83,7 +96,7 @@ rule api_exposes_only_the_ddns_route {
 
 rule asn_restriction_is_enforced_at_the_api {
     Conditions.UseAsnRestriction.'Fn::Equals' == [ { 'Ref': 'AsnRestrictionEnabled' }, 'true' ]
-    Conditions.UseHttpApi.'Fn::Not' == [ { 'Condition': 'UseWaf' } ]
+    Conditions.UseFunctionUrl.'Fn::Not' == [ { 'Condition': 'UseWaf' } ]
     Conditions.UseWaf.'Fn::And' == [ { 'Condition': 'UseAsnRestriction' }, { 'Fn::Equals': [ { 'Ref': 'AsnRestrictionMethod' }, 'waf' ] } ]
     Parameters.AsnRestrictionMethod.AllowedValues == ['static', 'waf']
     Resources.UpdateFunction.Properties.Environment.Variables {

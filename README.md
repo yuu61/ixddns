@@ -3,19 +3,20 @@
 NEC IXの標準DDNSクライアントからHTTPS GETでIPアドレスを通知し、AWS LambdaがRoute 53のレコードを更新します。AWS側の定義は共通リソース・API・WAFに分割し、Makefileで1つのCloudFormationテンプレートへ結合してデプロイします。Lambdaのコードも生成テンプレートへ埋め込むため、S3へのコード配置、SAM、CDK、npmは不要です。
 
 ```text
-IX3315 -- HTTPS GET --> API Gateway（HTTP API / WAF方式はREST API）
-                                                    |
-                                             Lambda (Python 3.14)
-                                               |           |
-                                         Secrets Manager  Route 53
+IX3315 -- HTTPS GET --> Function URL（制限なし・static）
+                   または AWS WAF + API Gateway REST API（waf）
+                                  |
+                           Lambda (Python 3.14)
+                             |           |
+                       Secrets Manager  Route 53
 ```
 
 ## 作成されるリソース
 
-- API Gatewayと`GET /update`ルート、スロットリング設定。ASN制限の設定でAPI方式を選択します。
+- 制限なし・`static`方式ではLambda Function URL。`waf`方式ではWAF付きREST APIとスロットリング設定。
 - Lambdaと、指定レコードの`UPSERT`だけを許可するIAMロール。
 - Secrets Managerで生成する48文字の英数字の共有トークン。
-- HTTP APIのアクセスログ、WAF方式のWAFログ、Lambdaログ。保存期間は標準で30日です。
+- Lambdaログと、WAF方式のWAFログ。保存期間は標準で30日です。
 - `waf`方式を選んだ場合、許可ASNと送信元IPごとの流量を検査するAWS WAF。
 
 ホストゾーンは既存のものを指定します。DNSレコードは最初の正常な通知で作成・更新され、CloudFormationの管理対象にはしません。1スタックで1つの名前・レコード種別を更新します。AとAAAAの両方を更新する場合は、別々のスタックとIXのDDNSプロファイルを使います。
@@ -27,7 +28,7 @@ IX3315 -- HTTPS GET --> API Gateway（HTTP API / WAF方式はREST API）
 - 更新対象はこのDDNS用の単純なAまたはAAAAレコードであること。既存レコードを指定すると、その値とTTLを置き換えます。
 - IPv4の場合、IXの通知対象インタフェースに登録するグローバルIPv4が付いていること。プライベートIP、CGNAT、DS-Lite、MAP-Eの到達性は別途検討が必要です。
 
-API Gateway、Lambda、Secrets Manager、CloudWatch Logs、Route 53の利用料金が発生します。料金の確認先は各サービスの[AWS公式料金ページ](https://aws.amazon.com/pricing/)です。
+Lambda、Secrets Manager、CloudWatch Logs、Route 53の利用料金が発生します。Function URL自体の追加料金はありません。`waf`方式ではAPI GatewayとWAFの料金も発生します。料金の確認先は各サービスの[AWS公式料金ページ](https://aws.amazon.com/pricing/)です。
 
 ## デプロイ
 
@@ -48,6 +49,7 @@ RECORD_NAME=router.example.com
 RECORD_TYPE=A
 RECORD_TTL=60
 LOG_RETENTION_DAYS=30
+LAMBDA_RESERVED_CONCURRENCY=1
 ASN_RESTRICTION_ENABLED=false
 ASN_RESTRICTION_METHOD=static
 ALLOWED_ASNS=
@@ -72,6 +74,7 @@ make deploy
 | `RECORD_TYPE` | `RecordType`。`A`または`AAAA` | `A` |
 | `RECORD_TTL` | `RecordTTL`。DNS TTL、秒 | `60` |
 | `LOG_RETENTION_DAYS` | `LogRetentionDays`。ログ保存期間、日 | `30` |
+| `LAMBDA_RESERVED_CONCURRENCY` | `LambdaReservedConcurrency`。Function URL方式の最大同時実行数、1〜1000。WAF方式では未使用 | `1` |
 | `ASN_RESTRICTION_ENABLED` | `AsnRestrictionEnabled`。送信元ASNによる制限 | `false` |
 | `ASN_RESTRICTION_METHOD` | `AsnRestrictionMethod`。`static`または`waf` | `static` |
 | `ASN_PREFIXES_FILE` | static用の取得済み一覧JSON。空欄ならビルド時に取得 | 空欄 |
@@ -95,17 +98,17 @@ Lambdaの実行ロールに付けるRoute 53権限は、ホストゾーン・正
 
 ## 送信元ASNによる制限と料金
 
-`.env`の`ASN_RESTRICTION_ENABLED`で有効・無効、`ASN_RESTRICTION_METHOD`で方式を選びます。低頻度のDDNS用途には`static`を推奨します。共有トークン認証とAPIのスロットリングは、全方式で必要です。
+`.env`の`ASN_RESTRICTION_ENABLED`で有効・無効、`ASN_RESTRICTION_METHOD`で方式を選びます。低頻度のDDNS用途には`static`を推奨します。共有トークン認証は全方式で必要です。流量はFunction URL方式では予約済み同時実行数、WAF方式ではREST APIとWAFのレート制限で抑えます。
 
 | 有効化 | 方式 | APIと送信元制限 | WAFの追加固定料金 / 月 / スタック |
 | --- | --- | --- | --- |
-| `false`（標準） | 無視 | HTTP API、送信元制限なし | 0 USD |
-| `true` | `static`（方式の標準） | HTTP API、デプロイ時のASNのCIDR一覧をLambdaで照合 | 0 USD |
+| `false`（標準） | 無視 | Function URL、送信元制限なし | 0 USD |
+| `true` | `static`（方式の標準） | Function URL、デプロイ時のASNのCIDR一覧をLambdaで照合 | 0 USD |
 | `true` | `waf` | Regional REST API、AWS WAFのASN判定と送信元IPごとのレート制限 | 約7 USD |
 
-現構成のWAF料金はWeb ACLが5 USD/月、ルール2つが各1 USD/月で、合計約7 USD/月です。さらにWAFのリクエスト料金（100万リクエストあたり0.60 USD）がかかります。A・AAAAを別スタックでWAF運用すると、固定料金は合計約14 USD/月です。`static`はこのWAF料金をなくし、Lambda内のCIDR照合による処理時間だけが増えます。API GatewayもHTTP APIを使うため、REST APIとは従量料金が異なります。[AWS WAF料金](https://aws.amazon.com/waf/pricing/)、[API Gateway料金](https://aws.amazon.com/api-gateway/pricing/)
+現構成のWAF料金はWeb ACLが5 USD/月、ルール2つが各1 USD/月で、合計約7 USD/月です。さらにWAFのリクエスト料金（100万リクエストあたり0.60 USD）がかかります。A・AAAAを別スタックでWAF運用すると、固定料金は合計約14 USD/月です。`static`はWAFとAPI Gatewayの料金をなくし、Lambda内のCIDR照合による処理時間だけが増えます。[AWS WAF料金](https://aws.amazon.com/waf/pricing/)、[API Gateway料金](https://aws.amazon.com/api-gateway/pricing/)
 
-これはWAF分の比較です。どの方式でもAPI Gateway・Lambda・Secrets Manager・CloudWatch Logs・Route 53等の通常料金は別途発生します。無料枠、リージョン、使用量、税によって総額は変わります。切り替え後も保持したログの保存料金は残る場合があります。
+表の金額はWAF分の比較です。Function URL自体には追加料金がなく、Lambdaの通常のリクエスト・実行時間の料金がかかります。どの方式でもLambda・Secrets Manager・CloudWatch Logs・Route 53等の通常料金は別途発生します。無料枠、リージョン、使用量、税によって総額は変わります。切り替え後も保持したログの保存料金は残る場合があります。[Function URLとAPI Gatewayの比較・料金](https://docs.aws.amazon.com/lambda/latest/dg/furls-http-invoke-decision.html)
 
 安価な方式を有効にする場合は次のように設定します。`64496,64500`は説明用の番号なので、実際の送信回線のASNへ変更してください。
 
@@ -122,7 +125,7 @@ ASN_PREFIXES_FILE=
 
 `make build`（`make deploy`でも自動実行）がRIPEstatのRIS Prefixes APIから、各ASNが起点となるIPv4・IPv6経路を取得します。最新のRIS観測時点を使い、通過するだけの経路は含めません。APIのnoiseフィルターで私用経路・ホスト経路・デフォルト経路などを除外し、取得した公開CIDRは切り捨てず埋め込みます。重複・隣接範囲は同じ許可範囲に統合し、一覧を圧縮してLambdaコードへ格納します。[RIPEstat RIS Prefixes](https://stat.ripe.net/docs/data-api/api-endpoints/ris-prefixes)
 
-LambdaはAPI Gatewayの`requestContext.http.sourceIp`（REST形式では`identity.sourceIp`）を一覧と照合し、許可範囲外ならシークレットを読む前に403で拒否します。`X-Forwarded-For`や登録する`ip`クエリの値は送信元判定に使いません。通信時のRIPEstat照会、S3読み取り、別の定期実行Lambdaはありません。[API Gatewayのイベント形式](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html)
+LambdaはFunction URLの`requestContext.http.sourceIp`（REST形式では`identity.sourceIp`）を一覧と照合し、許可範囲外ならシークレットを読む前に403で拒否します。`X-Forwarded-For`や登録する`ip`クエリの値は送信元判定に使いません。通信時のRIPEstat照会、S3読み取り、別の定期実行Lambdaはありません。[Function URLのイベント形式](https://docs.aws.amazon.com/lambda/latest/dg/urls-invocation.html)
 
 一覧は生成テンプレートと同じディレクトリの`asn-prefixes.json`（標準では`.build/asn-prefixes.json`）にも保存します。ASN・取得日時・各ASNの観測日時・許可CIDRを確認できます。RIPEstatの取得失敗、ASNごとの空の経路、件数の欠落、不正な経路、48時間より古い観測はビルドを停止します。取得失敗時に古い一覧へ自動フォールバックせず、AWSへのデプロイも進めません。テンプレートがCloudFormationの51,200バイト制限を超える場合も停止し、CIDRを部分的に削ってデプロイしません。
 
@@ -136,24 +139,34 @@ RISで観測した起点経路は、ASNが保有する全アドレスの保証�
 
 従来のWAF構成を使う場合は`ASN_RESTRICTION_METHOD=waf`にします。この方式ではRIPEstatへ取得せず、AWS WAFが通信の送信元IPからASNを判定します。転送ヘッダーは判定に使いません。AWSが管理する判定を使えるため、CIDR一覧を自分で更新する必要はありません。[AWSのASN判定](https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-asn-match.html)
 
-AWS WAFはHTTP APIへ直接関連付けられないため、WAF方式だけREST APIを作成します。ASN許可ルールより先に送信元IPごとのレート制限を評価し、60秒の評価期間に60リクエストを目安として遮断します。厳密な回数保証ではありません。static方式には、このWAFの送信元IPごとのレート制限はありません。[APIの対応機能](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-vs-rest.html)、[AWSのレート制限](https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html)
+AWS WAFはFunction URLへ直接関連付けられないため、WAF方式だけREST APIを作成し、Function URLとその公開実行権限は作成しません。ASN許可ルールより先に送信元IPごとのレート制限を評価し、60秒の評価期間に60リクエストを目安として遮断します。厳密な回数保証ではありません。static方式には、このWAFの送信元IPごとのレート制限はありません。[Function URLとAPI Gatewayの比較](https://docs.aws.amazon.com/lambda/latest/dg/furls-http-invoke-decision.html)、[AWSのレート制限](https://docs.aws.amazon.com/waf/latest/developerguide/waf-rule-statement-type-rate-based.html)
 
 ```sh
 make deploy
 make ix-config
 ```
 
-**waf方式へ、またはwaf方式から切り替えるとAPIのURLが変わります。** デプロイ後に`make ix-config`で再生成し、IXのURLを更新してください。制限なしとstatic方式の切り替えは同じHTTP APIを使います。生成スクリプトは`.env`とデプロイ済みスタックの有効化・方式・許可ASNを比較するため、設定だけ変更した状態では生成を停止します。方式パラメータ追加前のASN対応スタックはwaf方式として扱います。従来の`.env`で有効化したまま方式を未指定にするとstatic方式になるため、WAFを維持したい場合は`waf`を明示してください。Lambda・共有トークン・ロググループは同じリソースを維持します。
+**waf方式へ、またはwaf方式から切り替えると更新URLが変わります。** デプロイ後に`make ix-config`で再生成し、IXのURLを更新してください。制限なしとstatic方式の切り替えは同じFunction URLを使います。生成スクリプトは`.env`とデプロイ済みスタックの有効化・方式・許可ASNを比較するため、設定だけ変更した状態では生成を停止します。方式パラメータ追加前のASN対応スタックはwaf方式として扱います。従来の`.env`で有効化したまま方式を未指定にするとstatic方式になるため、WAFを維持したい場合は`waf`を明示してください。Lambda・共有トークン・Lambdaログ・WAFログは同じリソースを維持します。
+
+## Function URLの動作と移行
+
+Function URLは`AuthType=NONE`でIXからの署名なしHTTPS GETを受け付け、Lambdaで共有トークンと、設定した場合はASNのCIDR一覧を検査します。公開する実行権限はFunction URL経由に限定し、同じ権限でInvoke APIを直接呼び出すことは許可しません。Function URLは全メソッド・パスをLambdaへ渡すため、Lambdaは`GET /update`だけを処理し、他のメソッドは405、他のパスは404で拒否します。出力の`UpdateUrl`には`/update`まで含まれます。[Function URLのアクセス制御](https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html)
+
+`.env`の`LAMBDA_RESERVED_CONCURRENCY`は標準で1です。Function URLの最大リクエスト数は予約済み同時実行数の10倍/秒なので、標準では最大10件/秒となり、同時実行数1を超える呼び出しやレート超過は429になります。従来のHTTP APIの毎秒1件・バースト2件とは異なり、送信元ごとの制限や課金総額の上限ではありません。AWSアカウントには予約用の同時実行枠が必要で、未予約の関数用に100を残す制約もあります。予約できない場合は、アカウントの同時実行数クォータを確認してください。[Function URLの流量制限](https://docs.aws.amazon.com/lambda/latest/dg/urls-configuration.html#urls-throttling)、[予約済み同時実行数の設定](https://docs.aws.amazon.com/lambda/latest/dg/configuration-concurrency.html)
+
+URLが判明しても共有トークンなしでDNSを変更することはできません。ただし、共有トークンやstatic方式の送信元制限はLambda内で判定するため、拒否したリクエストにもLambdaの実行料金がかかります。URLを認証情報の代わりにはしません。通常のコード更新ではURLを維持し、定期的なURLローテーションは行いません。
+
+既存の制限なし・static方式のHTTP API構成からは、同じ`STACK_NAME`で`make deploy`を実行するとFunction URL構成へ移行します。旧HTTP APIは削除され、更新URLが変わるため、続けて`make ix-config`を実行し、生成コンフィグをIXへ投入して`ddns update`で確認してください。HTTP APIの`ApiLogGroup`出力は削除します。旧アクセスロググループは`Retain`で残り、CloudFormationの管理から外れるため、不要になった場合は所有者が個別に削除してください。移行で共有トークンは変更しません。waf方式の既存スタックはREST APIを維持します。
 
 ## 定義ファイルの構成
 
 | ファイル | 内容 |
 | --- | --- |
 | [cloudformation.yaml](cloudformation.yaml) | 共通パラメータ・切り替え条件・Lambda・IAM・共有トークン・ログ |
-| [infrastructure/http-api.yaml](infrastructure/http-api.yaml) | 制限なし・static方式で使うHTTP API |
+| [infrastructure/function-url.yaml](infrastructure/function-url.yaml) | 制限なし・static方式のFunction URLと、URL経由だけに限定した公開実行権限 |
 | [infrastructure/rest-api.yaml](infrastructure/rest-api.yaml) | waf方式で使うREST API |
 | [infrastructure/waf.yaml](infrastructure/waf.yaml) | 許可ASN・WAF・関連付け・WAFログ |
-| [lambda/index.py](lambda/index.py) | 両APIで共通の認証・IP検査・Route 53更新処理 |
+| [lambda/index.py](lambda/index.py) | Function URL・REST APIで共通のルート検査・認証・IP検査・Route 53更新処理 |
 | [scripts/build_template.py](scripts/build_template.py) | 定義の結合とLambdaコード・CIDR一覧の埋め込み |
 | [scripts/asn_prefixes.py](scripts/asn_prefixes.py) | 起点CIDRの取得・検証・統合 |
 
@@ -267,7 +280,7 @@ make ix-config ENV_FILE=.env.ipv6
 | `429` | APIのスロットリング |
 | `503` | シークレット読み取り・Route 53更新の失敗、またはstatic一覧の未埋め込み・ASN不一致 |
 
-正常時はLambdaログに`ddns_update_accepted`、AWS処理の失敗時は`ddns_update_failed`を記録します。リクエスト全体やトークンはログに記録しません。HTTP APIのアクセスログにもクエリを含めません。
+正常時はLambdaログに`ddns_update_accepted`、AWS処理の失敗時は`ddns_update_failed`を記録します。リクエスト全体やトークンはログに記録しません。Function URLのAPIアクセスログは作成せず、LambdaログとCloudWatchの呼び出し数・エラー・スロットリングのメトリクスで確認します。
 
 static方式の送信元拒否はLambdaログの`ddns_source_rejected`で確認します。WAF方式は`make outputs`の`WafLogGroup`で遮断理由を確認します。WAFログはクエリ全体・Authorization・Cookieヘッダーを除外し、リクエストのサンプリングも無効にしています。REST APIのアクセス／実行ログは設定せず、WAFログとLambdaログで確認します。このためAPI Gatewayのリージョン共通のCloudWatchログロールを設定する必要はありません。CloudWatch Logsは標準の保存時暗号化を使用します。ログの閲覧権限は対象の利用者に限定してください。
 
@@ -356,7 +369,7 @@ make format
 
 ## スタック削除時の扱い
 
-API、Lambda、IAMロールは削除されます。ホストゾーンと、Lambdaが更新したDNSレコードは残ります。共有トークンとロググループも`Retain`で残すため、不要になった場合は所有者が個別に削除してください。
+Function URLまたはREST API、Lambda、IAMロールは削除されます。ホストゾーンと、Lambdaが更新したDNSレコードは残ります。共有トークンとロググループも`Retain`で残すため、不要になった場合は所有者が個別に削除してください。
 
 `RecordName`や`RecordType`を変更した場合も、変更前のDNSレコードは自動削除されません。不要なレコードは個別に整理してください。
 
@@ -367,7 +380,8 @@ API、Lambda、IAMロールは削除されます。ホストゾーンと、Lambd
 - NEC IX2000/IX3000 コマンドリファレンス Ver.10.11-1.1、`service ssl-protocol`、`ddns`関連コマンド。
 - [AWS: Route 53更新API](https://docs.aws.amazon.com/Route53/latest/APIReference/API_ChangeResourceRecordSets.html)
 - [AWS: Route 53のレコード単位のIAM条件](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/specifying-conditions-route53.html)
-- [AWS: HTTP APIのLambda連携](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html)
+- [AWS: Function URLのイベント形式](https://docs.aws.amazon.com/lambda/latest/dg/urls-invocation.html)
+- [AWS: Function URLのアクセス制御](https://docs.aws.amazon.com/lambda/latest/dg/urls-auth.html)
 - [AWS: Lambdaランタイム](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html)
 - [Ruff: 設定方法](https://docs.astral.sh/ruff/configuration/)
 - [Ruff: ルール一覧](https://docs.astral.sh/ruff/rules/)

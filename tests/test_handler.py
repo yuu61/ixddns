@@ -106,7 +106,11 @@ class HandlerTests(unittest.TestCase):
     ) -> dict[str, object]:
         query = urlencode({"ip": ip, "token": token}) if raw is None else raw
         return self.module.handler(
-            {"rawQueryString": query, "requestContext": {"http": {"method": method}}},
+            {
+                "rawPath": "/update",
+                "rawQueryString": query,
+                "requestContext": {"http": {"method": method}},
+            },
             None,
         )
 
@@ -190,6 +194,18 @@ class HandlerTests(unittest.TestCase):
         self.route53.change_resource_record_sets.assert_not_called()
         self.secrets.get_secret_value.assert_not_called()
 
+    def test_function_url_rejects_other_paths_before_reading_secret(self) -> None:
+        for path in ("/", "/update/", "/other", "/ddns/update", None):
+            event = {
+                "rawPath": path,
+                "rawQueryString": "ip=8.8.8.8&token=correct-token",
+                "requestContext": {"http": {"method": "GET"}},
+            }
+            with self.subTest(path=path):
+                self.assertEqual(self.module.handler(event, None)["statusCode"], 404)
+        self.secrets.get_secret_value.assert_not_called()
+        self.route53.change_resource_record_sets.assert_not_called()
+
     def test_ipv6_and_record_family_are_checked(self) -> None:
         self.assertEqual(self.invoke(ip="2606:4700:4700::1111")["statusCode"], 400)
         with patch.dict(os.environ, {"RECORD_TYPE": "AAAA"}):
@@ -250,6 +266,8 @@ class HandlerTests(unittest.TestCase):
     def test_rest_api_updates_with_the_same_authentication_and_ip_checks(self) -> None:
         event = {
             "httpMethod": "GET",
+            "resource": "/update",
+            "path": "/ddns/update",
             "multiValueQueryStringParameters": {
                 "ip": ["8.8.8.8"],
                 "token": ["correct-token"],
@@ -278,7 +296,11 @@ class HandlerTests(unittest.TestCase):
         ):
             with self.subTest(query=query):
                 result = self.module.handler(
-                    {"httpMethod": "GET", "multiValueQueryStringParameters": query},
+                    {
+                        "httpMethod": "GET",
+                        "resource": "/update",
+                        "multiValueQueryStringParameters": query,
+                    },
                     None,
                 )
                 self.assertEqual(result["statusCode"], 400)

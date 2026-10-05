@@ -51,6 +51,7 @@ class StaticHandlerTests(unittest.TestCase):
         source: str | None = "8.8.8.8", token: str = "correct-token"
     ) -> dict[str, object]:
         return {
+            "rawPath": "/update",
             "rawQueryString": urlencode({"ip": "8.8.8.8", "token": token}),
             "requestContext": {"http": {"method": "GET", "sourceIp": source}},
         }
@@ -123,6 +124,7 @@ class StaticHandlerTests(unittest.TestCase):
     def test_rest_event_uses_identity_source_not_headers_or_query(self) -> None:
         event = {
             "httpMethod": "GET",
+            "resource": "/update",
             "requestContext": {"identity": {"sourceIp": "8.8.8.8"}},
             "multiValueQueryStringParameters": {
                 "ip": ["8.8.8.8"],
