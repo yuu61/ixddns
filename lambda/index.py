@@ -1,6 +1,7 @@
 """IXの通知を認証し、許可した送信元から固定のRoute 53レコードを更新する。"""
 
 import base64
+import bisect
 import hmac
 import ipaddress
 import json
@@ -34,9 +35,41 @@ ASN_SNAPSHOT = (
     if ASN_SNAPSHOT_DATA
     else None
 )
-SOURCE_NETWORKS = tuple(
-    ipaddress.ip_network(value)
-    for value in (ASN_SNAPSHOT["cidrs"] if ASN_SNAPSHOT else [])
+
+
+def _parse_intervals(
+    cidrs: list[str] | None,
+) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    """CIDR一覧から二分探索用のIPv4/IPv6開始・終了アドレス整数タプルを作る。
+
+    Returns:
+        IPv4の開始・終了タプルとIPv6の開始・終了タプル。
+
+    """
+    if not cidrs:
+        return (), (), (), ()
+    v4_ranges: list[tuple[int, int]] = []
+    v6_ranges: list[tuple[int, int]] = []
+    for value in cidrs:
+        network = ipaddress.ip_network(value)
+        start = int(network.network_address)
+        end = int(network.broadcast_address)
+        if isinstance(network, ipaddress.IPv4Network):
+            v4_ranges.append((start, end))
+        else:
+            v6_ranges.append((start, end))
+    v4_ranges.sort()
+    v6_ranges.sort()
+    return (
+        tuple(start for start, _ in v4_ranges),
+        tuple(end for _, end in v4_ranges),
+        tuple(start for start, _ in v6_ranges),
+        tuple(end for _, end in v6_ranges),
+    )
+
+
+IPV4_STARTS, IPV4_ENDS, IPV6_STARTS, IPV6_ENDS = _parse_intervals(
+    ASN_SNAPSHOT["cidrs"] if ASN_SNAPSHOT else None
 )
 
 
@@ -51,7 +84,7 @@ class RequestError(Exception):
 
 
 def source_allowed(event: dict[str, object]) -> bool:
-    """送信元IPをFunction URLまたはREST APIの情報から取得し、CIDR一覧と照合する。
+    """送信元IPをFunction URLまたはREST APIの情報から取得し、二分探索で照合する。
 
     Returns:
         送信元が許可される場合はTrue。
@@ -71,7 +104,7 @@ def source_allowed(event: dict[str, object]) -> bool:
         return True
     configured = {int(value) for value in os.environ["ALLOWED_ASNS"].split(",")}
     if (
-        not SOURCE_NETWORKS
+        not (IPV4_STARTS or IPV6_STARTS)
         or not ASN_SNAPSHOT
         or configured != set(ASN_SNAPSHOT["asns"])
     ):
@@ -87,7 +120,14 @@ def source_allowed(event: dict[str, object]) -> bool:
         address = ipaddress.ip_address(value)
     except ValueError:
         return False
-    return any(address in network for network in SOURCE_NETWORKS)
+    target = int(address)
+    starts, ends = (
+        (IPV4_STARTS, IPV4_ENDS)
+        if isinstance(address, ipaddress.IPv4Address)
+        else (IPV6_STARTS, IPV6_ENDS)
+    )
+    index = bisect.bisect_right(starts, target) - 1
+    return index >= 0 and target <= ends[index]
 
 
 def response(status_code: int, status: str, **details: str) -> dict[str, object]:

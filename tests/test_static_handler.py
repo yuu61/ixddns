@@ -59,7 +59,14 @@ class StaticHandlerTests(unittest.TestCase):
     def test_allowed_ipv4_and_ipv6_sources_can_update_after_token_authentication(
         self,
     ) -> None:
-        for source in ("8.8.8.1", "8.8.8.255", "2606:4700:4700::1111"):
+        for source in (
+            "8.8.8.0",
+            "8.8.8.1",
+            "8.8.8.255",
+            "2606:4700::",
+            "2606:4700:4700::1111",
+            "2606:4700:ffff:ffff:ffff:ffff:ffff:ffff",
+        ):
             with self.subTest(source=source):
                 self.assertEqual(
                     self.module.handler(self.event(source), None)["statusCode"], 200
@@ -68,8 +75,12 @@ class StaticHandlerTests(unittest.TestCase):
 
     def test_outside_missing_invalid_and_scoped_sources_never_read_secret(self) -> None:
         for source in (
+            "8.8.7.255",
+            "8.8.9.0",
             "8.8.9.1",
             "1.1.1.1",
+            "2606:46ff:ffff:ffff:ffff:ffff:ffff:ffff",
+            "2606:4701::",
             "2606:4701::1",
             "10.0.0.1",
             "invalid",
@@ -137,6 +148,55 @@ class StaticHandlerTests(unittest.TestCase):
         with self.assertLogs("ddns_lambda", level="WARNING"):
             self.assertEqual(self.module.handler(event, None)["statusCode"], 403)
         self.route53.change_resource_record_sets.assert_not_called()
+
+    def test_binary_search_with_multiple_noncontiguous_cidrs(self) -> None:
+        custom_snapshot = {
+            "schema_version": 1,
+            "source": "https://stat.ripe.net/data/ris-prefixes/data.json",
+            "asns": [3333],
+            "fetched_at": "2026-10-06T00:00:00+00:00",
+            "query_times": {"3333": "2026-10-06T00:00:00+00:00"},
+            "cidrs": [
+                "192.0.2.0/25",
+                "192.0.2.192/26",
+                "198.51.100.0/24",
+                "2001:db8:1::/48",
+                "2001:db8:3::/48",
+            ],
+        }
+        code = build_template(custom_snapshot)["Resources"]["UpdateFunction"][
+            "Properties"
+        ]["Code"]["ZipFile"]
+        module = support.load_handler(self.route53, self.secrets, code)
+        allowed_ips = (
+            "192.0.2.0",
+            "192.0.2.127",
+            "192.0.2.192",
+            "192.0.2.255",
+            "198.51.100.1",
+            "2001:db8:1::1",
+            "2001:db8:3::ffff",
+        )
+        for ip in allowed_ips:
+            with self.subTest(allowed_ip=ip):
+                self.assertEqual(
+                    module.handler(self.event(ip), None)["statusCode"], 200
+                )
+        rejected_ips = (
+            "192.0.2.128",
+            "192.0.2.191",
+            "198.51.99.255",
+            "198.51.101.0",
+            "2001:db8:2::1",
+        )
+        for ip in rejected_ips:
+            with (
+                self.subTest(rejected_ip=ip),
+                self.assertLogs("ddns_lambda", level="WARNING"),
+            ):
+                self.assertEqual(
+                    module.handler(self.event(ip), None)["statusCode"], 403
+                )
 
 
 if __name__ == "__main__":
