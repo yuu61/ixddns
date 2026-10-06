@@ -95,11 +95,3 @@ lint: ruff build
 
 guard: lint
 	"$(CFN_GUARD)" validate --rules "$(RULES)" --data "$(TEMPLATE)" --output-format json --show-summary none
-
-# 互換エイリアス
-list-sites: list
-check-sites: check
-deploy-sites: deploy
-outputs-sites: outputs
-token-sites: token
-ix-config-sites: ix-config
